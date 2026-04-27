@@ -71,11 +71,17 @@ class ConsensusResult:
   - **Entailment Failure Policy:** A failed bidirectional check (one or both directions predict contradiction/neutral) logs a `WARNING` but does not suppress the answer. The return type of `aggregate` is `str`; low-confidence signalling is the orchestrator's responsibility via `ConsensusResult.is_low_confidence`.
   - **Test Isolation Strategy:** `tests/conftest.py` contains an `autouse=True` function-scoped fixture that stubs `_embed` (returns `zeros((N, 2))`) and `_batched_entailment` (returns `(True, True)`) for every test in the suite. Orchestrator integration tests run without triggering model downloads. Aggregation unit/integration tests override these stubs per-test with `monkeypatch.setattr`, which shares the same `monkeypatch` instance and reverts cleanly in LIFO order.
 
-## 4. Fault Models & Injection (`faults/injector.py`)
+## 4. Fault Models & Injection (`faults/injector.py`) ✅
 Applies mutations to the cached data to simulate three fault conditions at varying fractions (β ∈ {0%, 15%, 30%, 45%}):
-- **F1 (Crash):** Simulate timeout. Agent produces no output.
-- **F2 (Byzantine):** Replace output with a pre-specified adversarial wrong answer.
-- **F3 (Drifter):** Replace output with syntactically plausible but semantically off-task text, simulating temperature 1.5.
+- **F1 (Crash):** Simulate timeout. Agent produces no output (`output_text=""`, `token_logprobs=[]`). Unconditionally dropped by Module 1 (empty logprob branch).
+- **F2 (Byzantine):** Replace output with a pre-specified adversarial wrong answer. Logprobs are spoofed to `−0.02` per entry → `5 × exp(−0.02) ≈ 4.90` mean TopKMass per position → **intentionally passes Module 1** at any realistic τ.
+- **F3 (Drifter):** Replace output with syntactically plausible but semantically off-task text, simulating temperature 1.5. Logprobs are spoofed to `−10.0` per entry → `5 × exp(−10) ≈ 2.3×10⁻⁴` mean TopKMass → **intentionally fails Module 1** at any τ > 0.001.
+- **Implementation notes:**
+  - **Entry point:** `inject_faults(generations, beta, fault_type, seed)` where `fault_type ∈ {F1, F2, F3, mix}`.
+  - **Exact count:** Exactly `math.floor(N × β)` agents are mutated — no rounding ambiguity.
+  - **Determinism:** Uses `random.Random(seed)` (isolated, never touches global state). `rng.sample(range(N), n_faults)` selects fault indices; for `mix`, `rng.choice(('F1','F2','F3'))` assigns per-agent types.
+  - **Immutability:** Original `AgentGeneration` objects are never mutated. Clean agents are returned by reference; faulty agents are new objects.
+  - **Logprob length:** Spoofed logprob lists match the source agent's token count (`T = len(original.token_logprobs) // 5`), defaulting to T=20 if the original is empty.
 
 ## 5. Evaluation Harness (`eval/runner.py`)
 - **Role:** Iterate over the cached, fault-injected data and generate metric reports.
