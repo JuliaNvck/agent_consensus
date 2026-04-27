@@ -1,0 +1,5 @@
+Read docs/PROPOSAL.md, specifically the Timeline and System Design sections. Scan the current directory structure and read the contents of the core files in pipeline/, coordination/, and eval/.
+Provide a concise, 3-part status report:
+1. Current Phase: Based on the 3-week timeline, exactly where are we?
+2. Completion Status: Which specific components of Module 1 (Filtering) and Module 2 (Aggregation) are implemented correctly, and what is currently missing or stubbed?
+3. Next Action: What is the single most critical task we need to execute right now to stay on schedule? Do not write code yet; just define the task.

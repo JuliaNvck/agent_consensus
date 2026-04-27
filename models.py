@@ -1,0 +1,18 @@
+from dataclasses import dataclass
+from typing import List, Optional
+
+
+@dataclass
+class AgentGeneration:
+    agent_id: str
+    output_text: str
+    token_logprobs: List[float]
+    is_faulty: bool
+    fault_type: Optional[str]  # None | 'F1_crash' | 'F2_byzantine' | 'F3_drifter'
+
+
+@dataclass
+class ConsensusResult:
+    final_answer: str
+    admitted_agents: List[str]
+    is_low_confidence: bool
