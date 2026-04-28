@@ -110,7 +110,7 @@ def main() -> None:
 
     gsm_questions, sqa_questions = _load_questions(args.n_questions)
 
-    llm = LLM(model=args.model)
+    llm = LLM(model=args.model, max_model_len=4096)
     tokenizer = llm.get_tokenizer()
 
     gsm_prompts = [_apply_chat_template(tokenizer, q["prompt"]) for q in gsm_questions]
