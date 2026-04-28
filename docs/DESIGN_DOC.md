@@ -86,7 +86,7 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - **Immutability:** Original `AgentGeneration` objects are never mutated. Clean agents are returned by reference; faulty agents are new objects.
   - **Logprob length:** Spoofed logprob lists match the source agent's token count (`T = len(original.token_logprobs) // 5`), defaulting to T=20 if the original is empty.
 
-## 5. Evaluation Harness (`eval/runner.py`)
+## 5. Evaluation Harness (`eval/runner.py`) ✅
 - **Role:** Iterate over the cached, fault-injected data and generate metric reports.
 - **Ablation Conditions:**
   - Baseline: No filter, majority voting aggregation.
@@ -95,3 +95,10 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - Full System: Module 1 admission -> Module 2 aggregation.
 - **External Baseline (`eval/decent_baseline.py`):** Re-implementation of DecentLLMs worker/evaluator scoring (isolate this from the main pipeline to prevent hallucinated dependencies).
 - **Output:** Pandas DataFrame exported to CSV tracking Accuracy, Admission Rate, and Fallback Frequency.
+- **Implementation notes:**
+  - **Cache format:** JSON file with `{"questions": [{"question_id", "ground_truth", "generations": [{agent fields}]}]}`. Minimum 7 agents per question (to support N=7). `load_cache(filepath)` returns `List[Tuple[str, List[AgentGeneration]]]`.
+  - **Baseline functions (`eval/baselines.py`):** `majority_voting` uses `collections.Counter.most_common(1)`. `soft_weighted_geometric_median` computes per-agent TopKMass mean as weight, runs a weighted Weiszfeld L-BFGS-B minimisation (`_weighted_geometric_median`), returns text of nearest agent. Falls back to uniform weights when all weights < 1e-15 (all F1 agents).
+  - **Embedding reuse in baselines:** `eval/baselines.py` accesses `_embed` via `from pipeline import aggregation as _aggregation; _aggregation._embed(texts)` so that `conftest.py`'s `autouse` monkeypatch on `pipeline.aggregation._embed` applies in tests without extra patching.
+  - **Liveness fallback in runner:** `_run_condition` replicates orchestrator logic directly (`await filter_agents(agents, tau)` + `if len(admitted) < 2f+1: fallback`) without the asyncio.sleep broadcast overhead. `f = (N-1)//3` (BFT standard: N=5→f=1, threshold=3; N=7→f=2, threshold=5).
+  - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types` keyword args (defaulting to the full grid) so tests can pass minimal single-element slices for speed.
+  - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = exact-match fraction; `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.

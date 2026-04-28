@@ -21,3 +21,5 @@
 - **Write Tests First:** Before implementing complex logic (e.g., sliding windows, tensor batching), write the `pytest` file first to verify the math.
 - **Stay Concise:** When responding, do not over-explain. Acknowledge instructions briefly and write the code.
 - **Living Documentation:** Treat `docs/DESIGN_DOC.md` as the ultimate source of truth. When you complete a major module, or right before a `/compact` command is run, automatically update the `DESIGN_DOC.md` to reflect the current state of the architecture, newly discovered edge cases, and cross off completed steps.
+
+Do not make any changes, until you have 95% confidence that you know what to build ask me follow up questions until you have that confidence.
