@@ -106,7 +106,7 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
 
 ## 6. Live Data Generation (`scripts/generate_cache.py`) ✅
 - **Role:** Offline Phase 1 script to run local LLM inference and build the static `cache.json` dataset for Phase 2 evaluation.
-- **Input:** Sample subsets (50 questions each) from HuggingFace `gsm8k` (`main` config, `test` split) and `tau/strategy_qa` (`test` split).
+- **Input:** Sample subsets (50 questions each) from HuggingFace `gsm8k` (`main` config, `test` split) and `wics/strategy-qa` (`test` split).
 - **Generation:** Uses `vllm.LLM` for synchronous batched inference with `temperature=0.7` (ensures text variance among N=7 agents) and `logprobs=5` (required for Module 1 filtering).
 - **Output:** Writes to `cache.json` matching the schema: `{"questions": [{"question_id": str, "ground_truth": str, "generations": [AgentGeneration dicts]}]}`.
 - **Implementation notes:**

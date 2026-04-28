@@ -49,7 +49,7 @@ def _load_questions(n: int) -> tuple[list[dict], list[dict]]:
         })
 
     sqa_questions: list[dict] = []
-    sqa = load_dataset("tau/strategy_qa", split="test")
+    sqa = load_dataset("wics/strategy-qa", split="test")
     for i, row in enumerate(sqa.select(range(min(n, len(sqa))))):
         sqa_questions.append({
             "question_id": f"stratqa_{i}",
