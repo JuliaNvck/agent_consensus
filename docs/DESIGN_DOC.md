@@ -103,3 +103,21 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types` keyword args (defaulting to the full grid) so tests can pass minimal single-element slices for speed.
   - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = exact-match fraction; `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.
   - **DecentLLMs external baseline (`eval/decent_baseline.py`):** Entry point `run_decent_baseline(agents, num_evaluators=5) -> str`. For each worker: (1) call `_evaluate_candidate(text, evaluator_id)` for each of `N_e=5` evaluators → `(N_e, 5)` score matrix over C=5 criteria (scores 0–20); (2) compute geometric median of that matrix via uniform-weight Weiszfeld (`_weighted_geometric_median` from `eval/baselines.py`); (3) sum the 5 robust-median components → scalar worker score. Winner = highest scalar score; tie-break = largest SHA-256 hex digest of `output_text`. `_evaluate_candidate` is a deterministic mockable helper (SHA-256 seed → `np.random.default_rng`) — no real LLM calls.
+
+## 6. Live Data Generation (`scripts/generate_cache.py`) ✅
+- **Role:** Offline Phase 1 script to run local LLM inference and build the static `cache.json` dataset for Phase 2 evaluation.
+- **Input:** Sample subsets (50 questions each) from HuggingFace `gsm8k` (`main` config, `test` split) and `tau/strategy_qa` (`test` split).
+- **Generation:** Uses `vllm.LLM` for synchronous batched inference with `temperature=0.7` (ensures text variance among N=7 agents) and `logprobs=5` (required for Module 1 filtering).
+- **Output:** Writes to `cache.json` matching the schema: `{"questions": [{"question_id": str, "ground_truth": str, "generations": [AgentGeneration dicts]}]}`.
+- **Implementation notes:**
+  - **The GPU Exception:** This is the *only* file in the repository permitted to import `vllm` and `torch`.
+  - **Explicit Prompts:** Raw questions are wrapped in dataset-specific templates before applying the model's chat template:
+    - GSM8K: `"Solve the following math problem step by step, ending with the final answer:\n{question}"`
+    - StrategyQA: `"Answer the following question with a clear 'yes' or 'no' and briefly explain why:\n{question}"`
+    - Chat template applied via `tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)`.
+  - **Dynamic `max_tokens`:** Two separate `llm.generate` calls are made — one per dataset — to avoid over-allocating GPU memory: GSM8K uses `max_tokens=256` (multi-step reasoning), StrategyQA uses `max_tokens=128` (short yes/no + explanation).
+  - **Logprob Geometry:** `CompletionOutput.logprobs` is `List[Dict[int, Logprob]]` — one dict per output token mapping `token_id → Logprob`. `_flatten_logprobs` sorts each dict descending by `.logprob`, takes the top-5, and pads to exactly 5 entries with `-100.0`. Result: a flat `List[float]` of length `5 × T`, strictly satisfying Module 1's `ValueError` guard (`len % 5 != 0 → raise`).
+  - **Ground Truth Extraction:** GSM8K answers contain reasoning text followed by `#### <number>` — ground truth is `answer.split("####")[-1].strip()`. StrategyQA `answer` is a boolean — converted to `"yes"` / `"no"`.
+  - **Agent IDs:** `f"q{question_id}_a{agent_idx}"` where `agent_idx ∈ 0..6`.
+  - **Default Agent State:** All `AgentGeneration` dicts initialised with `is_faulty=False`, `fault_type=None`.
+  - **CLI:** `python scripts/generate_cache.py [--model ...] [--n-questions 50] [--output cache.json]`.
