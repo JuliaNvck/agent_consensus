@@ -93,7 +93,7 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - Soft-weighting: Score-weighted geometric median.
   - Hard-filtering: Module 1 admission -> majority voting.
   - Full System: Module 1 admission -> Module 2 aggregation.
-- **External Baseline (`eval/decent_baseline.py`):** Re-implementation of DecentLLMs worker/evaluator scoring (isolate this from the main pipeline to prevent hallucinated dependencies).
+- **External Baseline (`eval/decent_baseline.py`) ✅:** Re-implementation of DecentLLMs worker/evaluator scoring (Jo & Park) — isolated from the main pipeline.
 - **Output:** Pandas DataFrame exported to CSV tracking Accuracy, Admission Rate, and Fallback Frequency.
 - **Implementation notes:**
   - **Cache format:** JSON file with `{"questions": [{"question_id", "ground_truth", "generations": [{agent fields}]}]}`. Minimum 7 agents per question (to support N=7). `load_cache(filepath)` returns `List[Tuple[str, List[AgentGeneration]]]`.
@@ -102,3 +102,4 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - **Liveness fallback in runner:** `_run_condition` replicates orchestrator logic directly (`await filter_agents(agents, tau)` + `if len(admitted) < 2f+1: fallback`) without the asyncio.sleep broadcast overhead. `f = (N-1)//3` (BFT standard: N=5→f=1, threshold=3; N=7→f=2, threshold=5).
   - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types` keyword args (defaulting to the full grid) so tests can pass minimal single-element slices for speed.
   - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = exact-match fraction; `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.
+  - **DecentLLMs external baseline (`eval/decent_baseline.py`):** Entry point `run_decent_baseline(agents, num_evaluators=5) -> str`. For each worker: (1) call `_evaluate_candidate(text, evaluator_id)` for each of `N_e=5` evaluators → `(N_e, 5)` score matrix over C=5 criteria (scores 0–20); (2) compute geometric median of that matrix via uniform-weight Weiszfeld (`_weighted_geometric_median` from `eval/baselines.py`); (3) sum the 5 robust-median components → scalar worker score. Winner = highest scalar score; tie-break = largest SHA-256 hex digest of `output_text`. `_evaluate_candidate` is a deterministic mockable helper (SHA-256 seed → `np.random.default_rng`) — no real LLM calls.
