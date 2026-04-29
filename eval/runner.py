@@ -2,16 +2,59 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Tuple
+import re
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from models import AgentGeneration
-from pipeline.filter import filter_agents
+from pipeline.filter import filter_agents, _compute_topk_mass_trajectory
 from pipeline.aggregation import aggregate
 from faults.injector import inject_faults
 from eval.baselines import majority_voting, soft_weighted_geometric_median
+
+def _extract_answer(output_text: str, ground_truth: str) -> str:
+    """Extract a comparable answer token from a chain-of-thought output.
+
+    StrategyQA (GT ∈ {"yes","no"}): returns first yes/no found (case-insensitive).
+    GSM8K (GT is a number string): returns the last number-like token, stripping $ and commas.
+    Fallback: returns output_text.strip() unchanged (preserves exact-match for synthetic GTs).
+    """
+    gt = ground_truth.strip().lower()
+    if gt in {"yes", "no"}:
+        m = re.search(r"\b(yes|no)\b", output_text.lower())
+        return m.group(1) if m else output_text.strip()
+    numbers = re.findall(r"\$?[\d,]+", output_text)
+    if numbers:
+        return numbers[-1].replace("$", "").replace(",", "")
+    return output_text.strip()
+
+
+def calibrate_tau(
+    questions: List[Tuple[str, List[AgentGeneration]]],
+    percentile: float = 10.0,
+) -> float:
+    """Return the `percentile`-th percentile of mean TopKMass across all agents.
+
+    Implements the design doc §3.2 calibration rule: τ = 10th percentile of clean-agent
+    scores on a dev slice. Call this on the uninjected cache before running experiments.
+    Falls back to _DEFAULT_TAU if no agents have non-empty logprobs.
+    """
+    scores: List[float] = []
+    for _, gens in questions:
+        for gen in gens:
+            if not gen.token_logprobs:
+                continue
+            traj = _compute_topk_mass_trajectory(gen.token_logprobs)
+            if len(traj) > 0:
+                scores.append(float(traj.mean()))
+    if not scores:
+        return _DEFAULT_TAU
+    scores.sort()
+    idx = max(0, min(int(len(scores) * percentile / 100.0), len(scores) - 1))
+    return scores[idx]
+
 
 _CONDITIONS: List[str] = ["baseline", "soft_weighting", "hard_only", "full_system"]
 _N_VALUES: List[int] = [5, 7]
@@ -85,7 +128,7 @@ async def _run_condition(
 async def run_experiment_1(
     cache_filepath: str,
     output_filepath: str = "results/experiment_1.csv",
-    tau: float = _DEFAULT_TAU,
+    tau: Optional[float] = None,
     seed: int = _DEFAULT_SEED,
     n_values: List[int] = _N_VALUES,
     beta_values: List[float] = _BETA_VALUES,
@@ -110,6 +153,8 @@ async def run_experiment_1(
         accuracy, admission_rate, fallback_frequency.
     """
     questions = load_cache(cache_filepath)
+    if tau is None:
+        tau = calibrate_tau(questions)
     rows: List[Dict] = []
 
     for n in n_values:
@@ -131,7 +176,7 @@ async def run_experiment_1(
                             faulty, condition, tau, f
                         )
                         accum[condition]["correct"].append(
-                            answer.strip() == ground_truth.strip()
+                            _extract_answer(answer, ground_truth) == ground_truth.strip()
                         )
                         accum[condition]["admission_rates"].append(
                             n_admitted / n if n > 0 else 0.0

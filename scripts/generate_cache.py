@@ -117,10 +117,10 @@ def main() -> None:
     sqa_prompts = [_apply_chat_template(tokenizer, q["prompt"]) for q in sqa_questions]
 
     # Separate SamplingParams per dataset to optimise GPU time
-    gsm_params = SamplingParams(n=7, temperature=0.7, logprobs=5, max_tokens=256)
+    gsm_params = SamplingParams(n=7, temperature=0.7, logprobs=5, max_tokens=512)
     sqa_params = SamplingParams(n=7, temperature=0.7, logprobs=5, max_tokens=128)
 
-    print(f"Generating {len(gsm_prompts)} GSM8K × 7 completions (max_tokens=256)...", flush=True)
+    print(f"Generating {len(gsm_prompts)} GSM8K × 7 completions (max_tokens=512)...", flush=True)
     gsm_results = llm.generate(gsm_prompts, gsm_params) if gsm_prompts else []
 
     print(f"Generating {len(sqa_prompts)} StrategyQA × 7 completions (max_tokens=128)...", flush=True)

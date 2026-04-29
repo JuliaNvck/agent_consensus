@@ -24,7 +24,7 @@ import pytest
 
 from models import AgentGeneration
 from eval.baselines import majority_voting, soft_weighted_geometric_median
-from eval.runner import load_cache, run_experiment_1
+from eval.runner import load_cache, run_experiment_1, _extract_answer, calibrate_tau
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,43 @@ def _write_cache(tmp_path, data: dict) -> str:
 # ---------------------------------------------------------------------------
 # Class 1: majority_voting
 # ---------------------------------------------------------------------------
+
+class TestExtractAnswer:
+    def test_gsm8k_plain_number(self):
+        assert _extract_answer("The answer is $18.", "18") == "18"
+
+    def test_gsm8k_comma_number(self):
+        assert _extract_answer("$70,000 profit", "70000") == "70000"
+
+    def test_stratqa_yes(self):
+        assert _extract_answer("Yes. Because the sky is blue.", "yes") == "yes"
+
+    def test_stratqa_no(self):
+        assert _extract_answer("No\n\nBecause it does not apply.", "no") == "no"
+
+    def test_stratqa_case_insensitive(self):
+        assert _extract_answer("YES definitely", "yes") == "yes"
+
+    def test_fallback_no_number(self):
+        assert _extract_answer("the correct answer", "correct") == "the correct answer"
+
+
+class TestCalibrateTau:
+    def test_returns_float(self):
+        questions = [("gt", [_make_gen(f"a{i}", "x") for i in range(3)])]
+        result = calibrate_tau(questions)
+        assert isinstance(result, float)
+
+    def test_result_leq_max_score(self):
+        questions = [("gt", [_make_gen(f"a{i}", "x") for i in range(5)])]
+        tau = calibrate_tau(questions)
+        # tau is 10th percentile, so it must be ≤ the maximum possible score
+        assert tau <= 2.0  # synthetic logprobs give TopKMass ≈ 1.415
+
+    def test_empty_questions_returns_default(self):
+        from eval.runner import _DEFAULT_TAU
+        assert calibrate_tau([]) == _DEFAULT_TAU
+
 
 class TestMajorityVoting:
     def test_empty_returns_empty_string(self) -> None:

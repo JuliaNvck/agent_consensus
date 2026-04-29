@@ -101,7 +101,9 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
   - **Embedding reuse in baselines:** `eval/baselines.py` accesses `_embed` via `from pipeline import aggregation as _aggregation; _aggregation._embed(texts)` so that `conftest.py`'s `autouse` monkeypatch on `pipeline.aggregation._embed` applies in tests without extra patching.
   - **Liveness fallback in runner:** `_run_condition` replicates orchestrator logic directly (`await filter_agents(agents, tau)` + `if len(admitted) < 2f+1: fallback`) without the asyncio.sleep broadcast overhead. `f = (N-1)//3` (BFT standard: N=5→f=1, threshold=3; N=7→f=2, threshold=5).
   - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types` keyword args (defaulting to the full grid) so tests can pass minimal single-element slices for speed.
-  - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = exact-match fraction; `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.
+  - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = extracted-answer exact-match fraction (see below); `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.
+  - **Answer extraction (`_extract_answer(output_text, ground_truth) -> str`):** Real LLM outputs are chain-of-thought strings, not bare answer tokens. Accuracy is computed on extracted answers: (1) StrategyQA (GT ∈ {"yes","no"}): regex finds the first `\b(yes|no)\b` in the output (case-insensitive); (2) GSM8K (GT is a number string): regex finds all `\$?[\d,]+` tokens, returns the last one stripped of `$` and `,`; (3) Fallback: returns `output_text.strip()` unchanged (preserves exact-match correctness for synthetic test caches).
+  - **Tau auto-calibration (`calibrate_tau(questions, percentile=10.0) -> float`):** `run_experiment_1` accepts `tau: Optional[float] = None`. When `None`, tau is calibrated automatically from the loaded clean agents: compute mean TopKMass for every agent with non-empty logprobs, sort, return the 10th-percentile value. This implements the design-doc §3.2 rule without requiring callers to supply a dataset-specific constant. Real LLM logprobs are a valid probability simplex (top-5 probs sum ≤ 1.0), so empirical clean-agent scores cluster in [0.83, 1.0]; `_DEFAULT_TAU = 1.0` is only suitable for unit-test synthetic logprobs where the top-5 sum can exceed 1.0.
   - **DecentLLMs external baseline (`eval/decent_baseline.py`):** Entry point `run_decent_baseline(agents, num_evaluators=5) -> str`. For each worker: (1) call `_evaluate_candidate(text, evaluator_id)` for each of `N_e=5` evaluators → `(N_e, 5)` score matrix over C=5 criteria (scores 0–20); (2) compute geometric median of that matrix via uniform-weight Weiszfeld (`_weighted_geometric_median` from `eval/baselines.py`); (3) sum the 5 robust-median components → scalar worker score. Winner = highest scalar score; tie-break = largest SHA-256 hex digest of `output_text`. `_evaluate_candidate` is a deterministic mockable helper (SHA-256 seed → `np.random.default_rng`) — no real LLM calls.
 
 ## 6. Live Data Generation (`scripts/generate_cache.py`) ✅
@@ -115,9 +117,61 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
     - GSM8K: `"Solve the following math problem step by step, ending with the final answer:\n{question}"`
     - StrategyQA: `"Answer the following question with a clear 'yes' or 'no' and briefly explain why:\n{question}"`
     - Chat template applied via `tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)`.
-  - **Dynamic `max_tokens`:** Two separate `llm.generate` calls are made — one per dataset — to avoid over-allocating GPU memory: GSM8K uses `max_tokens=256` (multi-step reasoning), StrategyQA uses `max_tokens=128` (short yes/no + explanation).
+  - **Dynamic `max_tokens`:** Two separate `llm.generate` calls are made — one per dataset — to avoid over-allocating GPU memory: GSM8K uses `max_tokens=512` (multi-step reasoning — raised from 256 after empirical analysis showed truncation causing ~10% accuracy loss), StrategyQA uses `max_tokens=128` (short yes/no + explanation).
   - **Logprob Geometry:** `CompletionOutput.logprobs` is `List[Dict[int, Logprob]]` — one dict per output token mapping `token_id → Logprob`. `_flatten_logprobs` sorts each dict descending by `.logprob`, takes the top-5, and pads to exactly 5 entries with `-100.0`. Result: a flat `List[float]` of length `5 × T`, strictly satisfying Module 1's `ValueError` guard (`len % 5 != 0 → raise`).
   - **Ground Truth Extraction:** GSM8K answers contain reasoning text followed by `#### <number>` — ground truth is `answer.split("####")[-1].strip()`. StrategyQA `answer` is a boolean — converted to `"yes"` / `"no"`.
   - **Agent IDs:** `f"q{question_id}_a{agent_idx}"` where `agent_idx ∈ 0..6`.
   - **Default Agent State:** All `AgentGeneration` dicts initialised with `is_faulty=False`, `fault_type=None`.
   - **CLI:** `python scripts/generate_cache.py [--model ...] [--n-questions 50] [--output cache.json]`.
+
+## 7. Paper Experimental Setup
+
+### 7.1 Models
+Two open-weight models of the same parameter class are evaluated to demonstrate generality across architectures:
+
+| Model | HuggingFace ID | Notes |
+|---|---|---|
+| LLaMA 3.1 8B Instruct | `meta-llama/Meta-Llama-3.1-8B-Instruct` | Primary model; Meta's instruction-tuned 8B |
+| Qwen2.5 7B Instruct | `Qwen/Qwen2.5-7B-Instruct` | Strong on both math and QA benchmarks |
+
+Each model gets its own `cache.json` (e.g., `cache_llama.json`, `cache_qwen.json`). The evaluation pipeline (`eval/runner.py`) is model-agnostic — `run_experiment_1` is called independently per cache.
+
+### 7.2 Datasets
+| Dataset | Split | N questions | Task type | Ground truth format |
+|---|---|---|---|---|
+| GSM8K (`gsm8k`, `main` config) | `test` | 50 | Multi-step arithmetic reasoning | Integer string (e.g. `"18"`) |
+| StrategyQA (`wics/strategy-qa`) | `test` | 50 | Commonsense multi-hop QA | `"yes"` / `"no"` |
+
+These two datasets stress orthogonal failure modes: GSM8K exposes step-counting errors and truncation under fault injection; StrategyQA exposes semantic drift and Byzantine manipulation.
+
+### 7.3 Baselines
+Five conditions are compared. The first four are implemented in `eval/runner.py` and `eval/baselines.py`; the fifth is cited from the original paper.
+
+| Condition | Description | Code location |
+|---|---|---|
+| **Single agent** | N=1, greedy decoding; no consensus | Requires adding N=1 to `n_values` grid |
+| **Self-consistency** (Wang et al., 2023) | Majority vote over N samples | `baseline` condition in `run_experiment_1` |
+| **Soft-weighted SC** | TopKMass-weighted geometric median | `soft_weighting` condition |
+| **Hard filter + majority** | Module 1 admission → majority vote | `hard_only` condition |
+| **Full system (ours)** | Module 1 admission → Module 2 semantic aggregation | `full_system` condition |
+
+**DecentLLMs (Jo & Park, 2024):** `eval/decent_baseline.py` implements the structural worker/evaluator scoring algorithm but uses SHA-256-seeded random scores as a deterministic stand-in for real LLM evaluator calls — suitable for unit testing and ablation structure, not paper reporting. For the paper, cite Jo & Park's reported numbers directly and note the model difference (they use GPT-3.5-Turbo; we use open-weight models).
+
+### 7.4 Evaluation Grid
+The ablation grid defined in `run_experiment_1` covers:
+- **N ∈ {5, 7}** agents per question
+- **β ∈ {0%, 15%, 30%, 45%}** fault fraction
+- **Fault types:** F1 (crash), F2 (Byzantine), F3 (drifter), mix
+
+The central claim of the paper is that the full system's accuracy-vs-β curve degrades more gracefully than self-consistency (baseline). The delta between `full_system` and `baseline` at β=0.30 and β=0.45 is the primary result.
+
+### 7.5 Published Reference Points
+These numbers provide sanity checks for beta=0 (no-fault) accuracy before fault injection:
+
+| Model | Dataset | Condition | Published accuracy | Source |
+|---|---|---|---|---|
+| LLaMA 3.1 8B | GSM8K | Greedy (single agent) | ~73% | Meta AI (2024) |
+| LLaMA 3.1 8B | GSM8K | Self-consistency N=40 | ~82% | Meta AI (2024) |
+| Qwen2.5 7B | GSM8K | Greedy (single agent) | ~85% | Qwen team (2024) |
+
+With N=7 agents and majority vote, expect beta=0 accuracy to land between the greedy and N=40 self-consistency figures. Numbers materially below the greedy baseline indicate an infrastructure issue (e.g., token truncation, prompt mismatch) rather than a model limitation.

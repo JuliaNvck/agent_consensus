@@ -1,0 +1,9 @@
+condition,n_agents,beta,fault_type,accuracy,admission_rate,fallback_frequency
+baseline,7,0.0,F3,0.66,1.0,0.0
+soft_weighting,7,0.0,F3,0.66,1.0,0.0
+hard_only,7,0.0,F3,0.66,0.9842857142857142,0.15
+full_system,7,0.0,F3,0.66,0.9842857142857142,0.15
+baseline,7,0.45,F3,0.0,1.0,0.0
+soft_weighting,7,0.45,F3,0.0,1.0,0.0
+hard_only,7,0.45,F3,0.0,1.0,1.0
+full_system,7,0.45,F3,0.0,1.0,1.0
