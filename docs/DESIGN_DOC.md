@@ -433,6 +433,19 @@ python -m eval.adversarial_test --cache cache.json --output-dir results/exp3_smo
 
 Fallback frequency: 7% on both models across all conditions (pre-existing F1_crash agents in the raw cache drop the admitted pool below 2f+1=5 on ~7 questions).
 
+**Centroid shift (avg distance to clean cluster centroid, lower = more robust):**
+
+| Coordination | Model | dist_mean | dist_gm | delta (mean−gm) |
+|---|---|---|---|---|
+| Uncoordinated | LLaMA | 0.339 | 0.094 | **+0.245** |
+| Uncoordinated | Qwen | 0.348 | 0.065 | **+0.282** |
+| Coordinated | LLaMA | 0.354 | 0.112 | **+0.242** |
+| Coordinated | Qwen | 0.367 | 0.076 | **+0.291** |
+| Maximally Adversarial | LLaMA | 0.354 | 0.112 | **+0.242** |
+| Maximally Adversarial | Qwen | 0.367 | 0.076 | **+0.291** |
+
+Positive delta confirms geometric median stays ~0.24–0.29 embedding units closer to the honest cluster than the arithmetic mean. Coordinated and maximally adversarial attacks produce a larger delta than uncoordinated (arithmetic mean is dragged harder by a tight adversarial cluster), while geometric median remains anchored near the clean majority centroid.
+
 **Key findings:**
 
 **1. Majority voting is catastrophically broken.** With 5 diverse clean agents (each unique chain-of-thought, 1 vote each) and 2 coordinated adversaries sharing the same wrong text (2 votes), the adversaries win the plurality on almost every question. The coordinated case (0-1%) is worse than uncoordinated (1-3%) because in the uncoordinated case the two adversaries use different texts and can't form a plurality either — the "winner" is random among all 7, giving ~1-3% by chance extraction.
