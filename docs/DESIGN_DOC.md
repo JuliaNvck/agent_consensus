@@ -415,9 +415,34 @@ python -m eval.adversarial_test --cache cache.json --output-dir results/
 python -m eval.adversarial_test --cache cache.json --output-dir results/exp3_smoke --n-questions 20
 ```
 
-### 9.9 Expected Results
+### 9.9 Measured Results (`cache_llma.json` + `cache_qwen.json`, 100 questions each)
 
-- **majority_voting** accuracy degrades sharply from uncoordinated → coordinated (coordinated attack exploits the plurality weakness).
-- **stage1_only** and **full_pipeline** are substantially more robust, because the geometric median with 5 clean vs 2 faulty correctly finds the clean cluster.
-- **full_pipeline** ≥ **stage1_only** under maximally_adversarial (Stage 2 NLI provides a residual check when Stage 1 is dragged).
-- **centroid_shift_delta** is near zero for uncoordinated (no coherent adversarial cluster), positive and increasing for coordinated and maximally_adversarial (geometric median more resistant than arithmetic mean).
+**Accuracy by coordination degree and pipeline condition:**
+
+| Coordination | Pipeline condition | LLaMA acc | Qwen acc |
+|---|---|---|---|
+| Uncoordinated | majority_voting | 3% | 1% |
+| Uncoordinated | stage1_only | 69% | 65% |
+| Uncoordinated | full_pipeline | 69% | 65% |
+| Coordinated | majority_voting | 1% | 0% |
+| Coordinated | stage1_only | 69% | 66% |
+| Coordinated | full_pipeline | 69% | 66% |
+| Maximally Adversarial | majority_voting | 1% | 0% |
+| Maximally Adversarial | stage1_only | 69% | 66% |
+| Maximally Adversarial | full_pipeline | 69% | 66% |
+
+Fallback frequency: 7% on both models across all conditions (pre-existing F1_crash agents in the raw cache drop the admitted pool below 2f+1=5 on ~7 questions).
+
+**Key findings:**
+
+**1. Majority voting is catastrophically broken.** With 5 diverse clean agents (each unique chain-of-thought, 1 vote each) and 2 coordinated adversaries sharing the same wrong text (2 votes), the adversaries win the plurality on almost every question. The coordinated case (0-1%) is worse than uncoordinated (1-3%) because in the uncoordinated case the two adversaries use different texts and can't form a plurality either — the "winner" is random among all 7, giving ~1-3% by chance extraction.
+
+**2. Geometric median is robust — and coordination degree is irrelevant.** `stage1_only` holds steady at the clean baseline accuracy (LLaMA 69%, Qwen 65-66%) across all three coordination degrees. This is the BFT guarantee: with f=2 < N/3 (2/7 ≈ 28.6% < 33.3%), the geometric median minimiser Σ‖x_i − y‖ provably converges to the honest majority cluster regardless of where the f adversarial points are placed. Whether the 2 adversaries cluster together or spread apart does not matter — the 5-vs-2 geometry is sufficient.
+
+**3. Stage 2 NLI adds no accuracy benefit.** `stage1_only == full_pipeline` on both models and all conditions. This is by design: `aggregate()` logs a warning on entailment failure but returns the geometric-median candidate unchanged. Stage 2 is an anomaly detector (surfaced via WARNING logs and `is_low_confidence`), not a correction mechanism. The NLI warnings do increase under maximally_adversarial, confirming Stage 2 is detecting the attack — it simply does not override the geometric median's already-correct selection.
+
+**4. The BFT guarantee is model-agnostic.** LLaMA and Qwen show identical qualitative behaviour. The 1-2% accuracy gap between models reflects their slightly different baseline correctness rates (LLaMA 69% vs Qwen 65-67% on this question set), not differential robustness.
+
+**5. The 7% fallback is a data artifact.** Some questions in the raw cache already contain F1_crash agents at positions 2-6 (empty logprobs). After injecting our f=2 adversarial agents at positions 0-1, these pre-existing crash agents are filtered by Module 1, occasionally dropping the admitted pool below the 2f+1=5 liveness threshold. On those 7 questions the fallback admits all 7 agents (including the 2 adversaries), slightly degrading accuracy.
+
+**Output figures:** `results/exp3_llama/experiment_3_adversarial.png`, `results/exp3_qwen/experiment_3_adversarial.png`
