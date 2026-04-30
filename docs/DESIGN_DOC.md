@@ -341,3 +341,83 @@ python -m eval.signal_quality --cache cache_qwen.json --output-dir results/exp2_
 **Panel B interpretation (TopKMass vs. Correctness scatter):** Both correct and incorrect agents cluster in a narrow high-confidence range ([0.79, 1.0] LLaMA; [0.94, 1.0] Qwen) with heavy overlap — there is no clean threshold that separates correct from incorrect. The vertical median lines show the correct cloud is shifted slightly right: LLaMA correct median 0.988 vs incorrect 0.981 (gap of 0.007); Qwen correct median 0.998 vs incorrect 0.995 (gap of 0.003). This is a real but modest effect, consistent with the AUC values above. TopKMass is not a correctness oracle — its primary value as a filter is detecting *broken* agents (F1 crash = empty logprobs, F3 drifters = TopKMass near 0) that fall far outside the clean cluster, not distinguishing correct from incorrect within the clean population.
 
 **Output figures:** `results/exp2_llama/experiment_2_signals.png`, `results/exp2_qwen/experiment_2_signals.png`
+
+---
+
+## 9. Experiment 3: Adversarial Coordination Stress Test (`eval/adversarial_test.py`)
+
+### 9.1 Research Question
+
+Experiments 1–2 quantify robustness under random fault injection and validate the TopKMass filter. Experiment 3 answers the hardest question: **what happens under a coordinated Byzantine attack** — the worst case for any consensus mechanism?
+
+The adversary now actively cooperates: multiple Byzantine agents agree on the same wrong answer *and* spoof their logprobs to look maximally confident, bypassing Module 1. Does Stage 2 (NLI Cross-Encoder Verification) provide a residual defense even when Stage 1 (Geometric Median) is dragged toward the adversarial cluster?
+
+Separately: does the geometric median genuinely resist being dragged more than a naïve arithmetic mean?
+
+### 9.2 Fixed Parameters
+
+| Parameter | Value |
+|---|---|
+| N (agents per question) | 7 |
+| f (tolerated faults) | 2 (β ≈ 28.6%) |
+| Liveness threshold (2f+1) | 5 |
+| τ | auto-calibrated via `calibrate_tau()` (same as Exp 1) |
+
+### 9.3 Three Coordination Degrees
+
+**Uncoordinated**: The f=2 Byzantine agents act independently and produce semantically different wrong texts — one uses `_F2_TEXT` ("WRONG: The answer is definitively incorrect."), the other uses `_F3_TEXT` (Arctic terns off-topic text). Both use logprobs = −0.02 so they pass Module 1. Because they embed far apart in semantic space, the geometric median cannot be dragged to a coherent adversarial location.
+
+**Coordinated**: Both agents produce the exact same wrong answer derived from ground truth (`"The answer is {opposite}."` for yes/no; `"The answer is {gt+7}."` for GSM8K). Logprobs = −0.02. They cluster at a single point in embedding space, exerting a coherent pull on the geometric median.
+
+**Maximally Adversarial**: Identical to coordinated but with logprobs = −0.01 (even higher spoofed confidence — `5 × exp(−0.01) ≈ 4.95` TopKMass per position, trivially above any realistic τ). This is the hardest possible attack: coordinated cluster + max-confidence spoofing.
+
+### 9.4 Three Pipeline Conditions
+
+**majority_voting**: No filter; `Counter(output_text).most_common(1)`. Vulnerable to coordinated attack because 2 identical wrong votes can beat a diverse correct majority of 5.
+
+**stage1_only**: Module 1 filter + liveness fallback → geometric median nearest-neighbor (no NLI Stage 2). Implemented in `eval/adversarial_test._aggregate_stage1_only` using `pipeline.aggregation._embed` and `_geometric_median` directly.
+
+**full_pipeline**: Module 1 filter + `pipeline.aggregation.aggregate()` — full Stage 1 geometric median + Stage 2 bidirectional NLI entailment check.
+
+### 9.5 Centroid Shift Metric
+
+For each question × coordination degree, before any filtering:
+```
+embs         = _embed([g.output_text for g in all_7_agents])    # (7, D)
+clean_centroid = mean(embs[clean_indices])                       # (5, D) → (D,)
+mean_centroid  = mean(embs)                                      # arithmetic mean of all 7
+gm_centroid    = _geometric_median(embs)                         # robust geometric median
+
+dist_mean = ||mean_centroid − clean_centroid||₂
+dist_gm   = ||gm_centroid   − clean_centroid||₂
+delta     = dist_mean − dist_gm    # positive = gm stays closer to clean cluster
+```
+
+Averaged over all questions per coordination degree. Positive delta = geometric median more robust than arithmetic mean against the coordinated cluster.
+
+### 9.6 Output Files
+
+| File | Description |
+|---|---|
+| `results/experiment_3_adversarial.csv` | Per-(coordination × pipeline_condition) row: accuracy, fallback_frequency, centroid_shift_mean, centroid_shift_gm, centroid_shift_delta |
+| `results/experiment_3_adversarial.png` | 2-panel figure: accuracy grouped bars + centroid shift paired bars |
+
+### 9.7 Figure Panels
+
+- **Panel A (Accuracy vs. Coordination):** Grouped bar chart — 3 pipeline conditions, 3 x-axis positions (coordination degrees). Shows accuracy degrading as adversarial coordination increases, with full_pipeline most resilient.
+- **Panel B (Centroid Shift):** Paired bars — arithmetic mean distance (light blue) vs. geometric median distance (green) to clean centroid, for each coordination degree. Positive Δ annotation above each pair quantifies geometric median's robustness advantage.
+
+### 9.8 How to Run
+
+```bash
+python -m eval.adversarial_test --cache cache.json --output-dir results/
+# Optional: limit to first N questions for quick testing
+python -m eval.adversarial_test --cache cache.json --output-dir results/exp3_smoke --n-questions 20
+```
+
+### 9.9 Expected Results
+
+- **majority_voting** accuracy degrades sharply from uncoordinated → coordinated (coordinated attack exploits the plurality weakness).
+- **stage1_only** and **full_pipeline** are substantially more robust, because the geometric median with 5 clean vs 2 faulty correctly finds the clean cluster.
+- **full_pipeline** ≥ **stage1_only** under maximally_adversarial (Stage 2 NLI provides a residual check when Stage 1 is dragged).
+- **centroid_shift_delta** is near zero for uncoordinated (no coherent adversarial cluster), positive and increasing for coordinated and maximally_adversarial (geometric median more resistant than arithmetic mean).
