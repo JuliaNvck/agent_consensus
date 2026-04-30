@@ -69,6 +69,7 @@ def plot_accuracy_vs_beta(
     llama_csv: str,
     qwen_csv: str,
     output_path: str,
+    show_n1: bool = True,
 ) -> None:
     llama_table, llama_n1 = _load(llama_csv)
     qwen_table, qwen_n1 = _load(qwen_csv)
@@ -81,9 +82,9 @@ def plot_accuracy_vs_beta(
         (axes[0], llama_table, llama_n1, "LLaMA 3.1 8B Instruct"),
         (axes[1], qwen_table, qwen_n1, "Qwen2.5 7B Instruct"),
     ]:
-        # N=1 reference line
-        ax.axhline(n1_acc, color="gray", linestyle=":", linewidth=1.2,
-                   label=f"Single Agent (N=1, {n1_acc:.2f})")
+        if show_n1:
+            ax.axhline(n1_acc, color="gray", linestyle=":", linewidth=1.2,
+                       label=f"Single Agent (N=1, {n1_acc:.2f})")
 
         for cond in _CONDITIONS:
             y = [table[cond].get(b, 0.0) for b in _BETAS]
@@ -147,7 +148,7 @@ def plot_fault_type_breakdown(
         width = 0.35
 
         for offset, cond, color, label in [
-            (-width / 2, "baseline", _COLORS["baseline"], "Self-Consistency"),
+            (-width / 2, "baseline", _COLORS["baseline"], "Self-Consistency (Majority Vote)"),
             (width / 2, "full_system", _COLORS["full_system"], "Full System (Ours)"),
         ]:
             y = []
@@ -156,7 +157,15 @@ def plot_fault_type_breakdown(
                         if r["condition"] == cond and r["beta"] == beta
                         and r["fault_type"] == ft and r["n_agents"] != 1.0]
                 y.append(sum(vals) / len(vals) if vals else 0.0)
-            ax.bar(x + offset, y, width, label=label, color=color, alpha=0.85)
+            bars = ax.bar(x + offset, y, width, label=label, color=color, alpha=0.85)
+            for bar, val in zip(bars, y):
+                label_y = bar.get_height() + 0.015
+                va = "bottom"
+                if val < 0.04:
+                    label_y = 0.04
+                ax.text(bar.get_x() + bar.get_width() / 2, label_y,
+                        f"{val:.0%}", ha="center", va=va, fontsize=8.5,
+                        color=color, fontweight="bold")
 
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_xlabel("Fault Type", fontsize=11)
@@ -173,7 +182,7 @@ def plot_fault_type_breakdown(
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=10,
                frameon=True, bbox_to_anchor=(0.5, -0.08))
-    fig.suptitle(f"Accuracy by Fault Type at β=45%", fontsize=14, y=1.01)
+    fig.suptitle("Accuracy by Fault Type at β=45%", fontsize=14, y=1.01)
     plt.tight_layout()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -186,11 +195,20 @@ if __name__ == "__main__":
     llama_csv = os.path.join(_RESULTS_DIR, "experiment_1_llama.csv")
     qwen_csv = os.path.join(_RESULTS_DIR, "experiment_1_qwen.csv")
 
+    # With single-agent reference line (supplementary / appendix)
     plot_accuracy_vs_beta(
         llama_csv, qwen_csv,
         os.path.join(_FIGURES_DIR, "accuracy_vs_beta.png"),
+        show_n1=True,
     )
     plot_fault_type_breakdown(
         llama_csv, qwen_csv,
         os.path.join(_FIGURES_DIR, "fault_type_breakdown.png"),
+    )
+
+    # Without single-agent reference line (main paper body)
+    plot_accuracy_vs_beta(
+        llama_csv, qwen_csv,
+        os.path.join(_FIGURES_DIR, "accuracy_vs_beta_no_n1.png"),
+        show_n1=False,
     )
