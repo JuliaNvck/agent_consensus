@@ -322,9 +322,22 @@ python -m eval.signal_quality --cache cache_llma.json --output-dir results/exp2_
 python -m eval.signal_quality --cache cache_qwen.json --output-dir results/exp2_qwen/
 ```
 
-### 8.7 Expected Results
+### 8.7 Results (`cache_llma.json` + `cache_qwen.json`, 700 agents each)
 
-- `topk_mass` AUC > 0.5 (better than chance) and higher than entropy/variance AUC
-- All `topk_mass` values in `[0.0, 1.0]` (valid probability simplex)
-- `neg_entropy` values are negative (raw top-5 entropy is positive before negation)
-- Panel B shows visible separation: the median TopKMass of correct agents > median of incorrect agents
+**ROC AUC and Average Precision:**
+
+| Signal | LLaMA AUC | LLaMA AP | Qwen AUC | Qwen AP |
+|---|---|---|---|---|
+| **TopKMass** | **0.606** | **0.802** | **0.627** | **0.765** |
+| −Entropy | 0.580 | 0.791 | 0.616 | 0.765 |
+| −Logprob Var | 0.448 | 0.675 | 0.538 | 0.678 |
+
+**Key findings:**
+- TopKMass is the best correctness predictor on both models (highest AUC and AP).
+- Logprob Variance performs *worse than chance* for LLaMA (AUC=0.448) — a strong negative result that validates using TopKMass over naive variance as the filter signal.
+- −Entropy is a close second to TopKMass on Qwen (AUC gap of only 0.010), but TopKMass retains a larger advantage on LLaMA (0.026 gap) and is architecturally motivated by the sliding-window design.
+- 700 agent generations per model (100 questions × 7 agents); LLaMA 69.4% correct, Qwen 67.3% correct.
+
+**Panel B interpretation (TopKMass vs. Correctness scatter):** Both correct and incorrect agents cluster in a narrow high-confidence range ([0.79, 1.0] LLaMA; [0.94, 1.0] Qwen) with heavy overlap — there is no clean threshold that separates correct from incorrect. The vertical median lines show the correct cloud is shifted slightly right: LLaMA correct median 0.988 vs incorrect 0.981 (gap of 0.007); Qwen correct median 0.998 vs incorrect 0.995 (gap of 0.003). This is a real but modest effect, consistent with the AUC values above. TopKMass is not a correctness oracle — its primary value as a filter is detecting *broken* agents (F1 crash = empty logprobs, F3 drifters = TopKMass near 0) that fall far outside the clean cluster, not distinguishing correct from incorrect within the clean population.
+
+**Output figures:** `results/exp2_llama/experiment_2_signals.png`, `results/exp2_qwen/experiment_2_signals.png`
