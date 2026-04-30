@@ -178,18 +178,19 @@ With N=7 agents and majority vote, expect beta=0 accuracy to land between the gr
 
 ### 7.6 LLaMA 3.1 8B Results (`cache_llma.json`, `results/experiment_1_llama.csv`)
 
-Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N=7 agents, temperature=0.7. Tau auto-calibrated from the 10th percentile of clean-agent TopKMass scores.
+Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N∈{1,5,7} agents, temperature=0.7. Tau auto-calibrated from the 10th percentile of clean-agent TopKMass scores. CSV contains 192 rows (128 for N∈{5,7} + 64 for N=1).
 
 **Accuracy by beta (averaged over N∈{5,7} and all fault types):**
 
-| Condition | β=0% | β=15% | β=30% | β=45% |
-|---|---|---|---|---|
-| baseline (self-consistency) | 0.710 | 0.710 | 0.001 | 0.000 |
-| soft_weighting | 0.715 | 0.701 | 0.544 | 0.357 |
-| hard_only | 0.710 | 0.714 | 0.435 | 0.294 |
-| **full_system (ours)** | **0.700** | **0.716** | **0.724** | **0.656** |
+| Condition | N=1 (single agent) | β=0% | β=15% | β=30% | β=45% |
+|---|---|---|---|---|---|
+| baseline (self-consistency) | 0.710 | 0.710 | 0.710 | 0.001 | 0.000 |
+| soft_weighting | 0.710 | 0.715 | 0.701 | 0.544 | 0.357 |
+| hard_only | 0.710 | 0.710 | 0.714 | 0.435 | 0.294 |
+| **full_system (ours)** | **0.710** | **0.700** | **0.716** | **0.724** | **0.656** |
 
 **Key findings:**
+- Single-agent accuracy (N=1): 0.710 — the no-consensus anchor. All conditions identical at N=1 since there is nothing to filter or aggregate.
 - Clean accuracy (β=0%) is 0.71 across all conditions, consistent with published LLaMA 3.1 8B self-consistency performance on GSM8K + StrategyQA combined.
 - `baseline` collapses completely at β≥0.30 (majority vote is overwhelmed when ~2 of 5 agents are faulty).
 - `full_system` maintains **0.656 accuracy at β=0.45** — the primary paper result. Delta vs baseline at β=0.45: **+0.656**.
@@ -201,18 +202,19 @@ Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N=7 
 
 ### 7.7 Qwen2.5 7B Results (`cache_qwen.json`, `results/experiment_1_qwen.csv`)
 
-Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=128` StrategyQA, N=7, temperature=0.7). Tau auto-calibrated per-cache.
+Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=128` StrategyQA, N∈{1,5,7}, temperature=0.7). Tau auto-calibrated per-cache. CSV contains 192 rows (128 for N∈{5,7} + 64 for N=1).
 
 **Accuracy by beta (averaged over N∈{5,7} and all fault types):**
 
-| Condition | β=0% | β=15% | β=30% | β=45% |
-|---|---|---|---|---|
-| baseline (self-consistency) | 0.690 | 0.690 | 0.011 | 0.003 |
-| soft_weighting | 0.660 | 0.665 | 0.499 | 0.340 |
-| hard_only | 0.690 | 0.690 | 0.438 | 0.291 |
-| **full_system (ours)** | **0.660** | **0.665** | **0.665** | **0.664** |
+| Condition | N=1 (single agent) | β=0% | β=15% | β=30% | β=45% |
+|---|---|---|---|---|---|
+| baseline (self-consistency) | 0.690 | 0.690 | 0.690 | 0.011 | 0.003 |
+| soft_weighting | 0.690 | 0.660 | 0.665 | 0.499 | 0.340 |
+| hard_only | 0.690 | 0.690 | 0.690 | 0.438 | 0.291 |
+| **full_system (ours)** | **0.690** | **0.660** | **0.665** | **0.665** | **0.664** |
 
 **Key findings:**
+- Single-agent accuracy (N=1): 0.690 — the no-consensus anchor for Qwen.
 - `full_system` accuracy is essentially flat across all fault fractions (0.660–0.665) — stronger robustness than LLaMA.
 - `baseline` collapses at β≥0.30 identically to LLaMA, confirming the failure mode is architectural (majority vote), not model-specific.
 - F2 (Byzantine) remains the hardest fault type: `full_system` scores 0.620 at β=0.45 vs 0.675–0.680 for F1/F3/mix.
@@ -220,11 +222,11 @@ Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=
 
 **Cross-model comparison at key fault levels:**
 
-| Condition | Model | β=0% | β=30% | β=45% |
-|---|---|---|---|---|
-| baseline | LLaMA 3.1 8B | 0.710 | 0.001 | 0.000 |
-| baseline | Qwen2.5 7B | 0.690 | 0.011 | 0.003 |
-| **full_system** | **LLaMA 3.1 8B** | **0.700** | **0.724** | **0.656** |
-| **full_system** | **Qwen2.5 7B** | **0.660** | **0.665** | **0.664** |
+| Condition | Model | N=1 | β=0% | β=30% | β=45% |
+|---|---|---|---|---|---|
+| baseline | LLaMA 3.1 8B | 0.710 | 0.710 | 0.001 | 0.000 |
+| baseline | Qwen2.5 7B | 0.690 | 0.690 | 0.011 | 0.003 |
+| **full_system** | **LLaMA 3.1 8B** | **0.710** | **0.700** | **0.724** | **0.656** |
+| **full_system** | **Qwen2.5 7B** | **0.690** | **0.660** | **0.665** | **0.664** |
 
 **Interpretation:** Both models show identical qualitative behaviour — `baseline` collapses under fault load while `full_system` remains robust — demonstrating that the pipeline's fault tolerance is model-agnostic. Qwen's flatter curve (variance < 0.005 across all β) makes it the stronger robustness demonstration; LLaMA's higher clean accuracy (0.710 vs 0.660) makes it the stronger absolute-performance result.
