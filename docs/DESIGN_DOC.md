@@ -257,3 +257,74 @@ Two-panel grouped bar chart. X-axis: fault types F1 (Crash), F2 (Byzantine), F3 
 **Key visual story:** The full system maintains meaningful accuracy under every fault type at maximum fault load; self-consistency provides zero resilience regardless of fault type.
 
 **Paper caption note:** Include the following explanation in the figure caption: *"Self-Consistency (Majority Vote) collapses to 0% under all fault types because 2 coordinated Byzantine agents share the same wrong answer, outvoting 3 clean agents whose correct answers are phrased differently."*
+
+---
+
+## 8. Experiment 2: Signal Quality Analysis (`eval/signal_quality.py`)
+
+### 8.1 Research Question
+
+Experiment 1 proves *that* the pipeline is robust. Experiment 2 proves *why*: is the TopKMass signal actually predictive of individual agent correctness, and is it a stronger predictor than simpler baselines (entropy, logprob variance)?
+
+### 8.2 Signal Definitions
+
+Three signals are computed per `AgentGeneration` from `token_logprobs` (flat list of top-5 logprobs, length `5×T`). All signals are oriented so that **higher = more confident = more likely correct** (entropy and variance are negated).
+
+**Signal 1 — TopKMass Mean** (the filter signal; reuses `pipeline/filter._compute_topk_mass_trajectory`):
+```
+traj = _compute_topk_mass_trajectory(token_logprobs)   # causal W=64 sliding window
+topk_mass = mean(traj)
+```
+
+**Signal 2 — Negated Mean Token Entropy** (baseline):
+```
+arr = token_logprobs.reshape(T, 5)
+probs = exp(arr)                                     # (T,5) unnormalized top-5 probs
+H_i  = -sum(probs[i] * arr[i])  for each position i  # -sum(p * log p), top-5 approximation
+neg_entropy = -mean(H_i)
+```
+Lower entropy = more peaked distribution = more confident → negating makes the signal higher-is-better.
+
+**Signal 3 — Negated Logprob Variance** (baseline):
+```
+per_pos_mean_lp = arr.mean(axis=1)   # (T,) mean logprob per position
+neg_logprob_var = -var(per_pos_mean_lp)
+```
+Lower variance = more stable confidence across the sequence → negated so higher-is-better.
+
+Agents with empty `token_logprobs` (F1_crash) are skipped — no signal to compute.
+
+### 8.3 Ground-Truth Labeling
+
+Uses the same `_extract_answer` from `eval/runner.py` as Experiment 1, ensuring consistency:
+```python
+is_correct = _extract_answer(gen.output_text, ground_truth) == ground_truth.strip()
+```
+
+### 8.4 Output Files
+
+| File | Description |
+|---|---|
+| `results/experiment_2_signals.csv` | Per-agent DataFrame: `question_id, topk_mass, neg_entropy, neg_logprob_var, is_correct` |
+| `results/experiment_2_signals.png` | 3-panel figure (ROC, scatter, PR) |
+
+### 8.5 Figure Panels
+
+- **Panel A (ROC Curves):** One line per signal with AUC in legend. Gray dashed chance diagonal.
+- **Panel B (Scatter):** TopKMass score vs. jittered correctness label. Vertical median lines per class (correct / incorrect) show distributional separation.
+- **Panel C (Precision-Recall):** One line per signal with Average Precision in legend. Gray dashed random-classifier baseline.
+
+### 8.6 How to Run
+
+```bash
+# On a specific cache (CPU only):
+python -m eval.signal_quality --cache cache_llma.json --output-dir results/exp2_llama/
+python -m eval.signal_quality --cache cache_qwen.json --output-dir results/exp2_qwen/
+```
+
+### 8.7 Expected Results
+
+- `topk_mass` AUC > 0.5 (better than chance) and higher than entropy/variance AUC
+- All `topk_mass` values in `[0.0, 1.0]` (valid probability simplex)
+- `neg_entropy` values are negative (raw top-5 entropy is positive before negation)
+- Panel B shows visible separation: the median TopKMass of correct agents > median of incorrect agents
