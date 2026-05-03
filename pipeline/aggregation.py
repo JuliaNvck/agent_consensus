@@ -98,42 +98,43 @@ def _batched_entailment(text_a: str, text_b: str) -> Tuple[bool, bool]:
     return a_entails_b, b_entails_a
 
 
-async def aggregate(admitted: List[AgentGeneration]) -> str:
+async def aggregate(admitted: List[AgentGeneration]) -> Tuple[str, bool]:
     """Module 2: extract the highest-fidelity answer from the admitted pool.
 
-    Stage 1 — Cluster (O(N)): embed outputs, compute geometric median, find
-    the nearest candidate text.
-    Stage 2 — Verify (O(1)): bidirectional NLI entailment between the nearest
-    candidate and the second-nearest (the closest independent cluster member).
-    Entailment failure logs a warning but does not suppress the answer; the
-    return type is str and confidence signalling is the orchestrator's job.
+    Stage 1 — Cluster (O(N)): embed outputs, compute geometric median, rank all
+    candidates by distance to the median.
+    Stage 2 — Verify (O(k)): iterate candidates nearest-first, testing bidirectional
+    NLI entailment against the fixed second-nearest reference. Return the first
+    candidate that passes. If none pass, return the nearest candidate with
+    is_low_confidence=True.
+
+    Returns:
+        (final_answer, is_low_confidence)
     """
     if not admitted:
-        return ""
+        return "", False
     if len(admitted) == 1:
-        return admitted[0].output_text
+        return admitted[0].output_text, False
 
     texts = [gen.output_text for gen in admitted]
 
-    # Stage 1: geometric median → nearest candidate
+    # Stage 1: geometric median → candidates ranked by distance
     embeddings = _embed(texts)                                     # (N, D)
     median = _geometric_median(embeddings)                         # (D,)
     dists = np.linalg.norm(embeddings - median, axis=1)           # (N,)
     sorted_idx = np.argsort(dists)
-    nearest_idx = int(sorted_idx[0])
-    reference_idx = int(sorted_idx[1])
+    reference = texts[int(sorted_idx[1])]                         # second-nearest, fixed
 
-    candidate = texts[nearest_idx]
-    reference = texts[reference_idx]
+    # Stage 2: find first candidate with bidirectional entailment against reference
+    for rank_idx in sorted_idx:
+        candidate = texts[int(rank_idx)]
+        a_ok, b_ok = _batched_entailment(candidate, reference)
+        if a_ok and b_ok:
+            return candidate, False
 
-    # Stage 2: single-batch bidirectional entailment
-    a_ok, b_ok = _batched_entailment(candidate, reference)
-    if not (a_ok and b_ok):
-        logger.warning(
-            "Weak bidirectional entailment for nearest-centroid candidate "
-            "(a→b=%s, b→a=%s). Returning candidate anyway.",
-            a_ok,
-            b_ok,
-        )
-
-    return candidate
+    # Fallback: no candidate passed NLI — return nearest with low-confidence flag
+    logger.warning(
+        "No candidate passed bidirectional NLI entailment against reference. "
+        "Returning nearest-centroid candidate with low-confidence flag."
+    )
+    return texts[int(sorted_idx[0])], True

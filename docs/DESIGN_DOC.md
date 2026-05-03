@@ -68,16 +68,16 @@ class ConsensusResult:
   - **Centroid Proxy Logic:** The design doc specifies "bidirectional entailment between the nearest candidate and the centroid itself." Three steps make this concrete:
     1. **Final Selection — Primary Candidate:** The geometric median is a mathematical coordinate in embedding space, not a text string. To determine the final answer, the system computes the Euclidean distance from this coordinate to every admitted agent's embedding and selects the text of the **nearest agent** as the Primary Candidate. This is the string ultimately returned by `aggregate`.
     2. **Verification Logic — Centroid Proxy:** Because an NLI model requires two text strings, the geometric median vector cannot be passed directly to it. The **second-nearest** admitted agent output serves as the Centroid Proxy — an independent agent output that is the closest distinct view of the same semantic cluster. Bidirectional entailment between the Primary Candidate and this proxy confirms that two independent, centrally-located agents agree semantically.
-    3. **Fallback on Entailment Failure:** If either direction of the entailment check fails (predicts contradiction or neutral), the system logs a `WARNING` but still returns the Primary Candidate unchanged. Suppressing the answer is not `aggregate`'s responsibility — the orchestrator flags the round with `ConsensusResult.is_low_confidence = True`. Edge case: when `N == 1`, Stage 2 is skipped entirely (single-agent shortcut at the top of `aggregate`).
+    3. **Candidate Selection with NLI Fallback:** `aggregate` iterates all admitted candidates in order of distance to the geometric median (nearest first), checking each against the fixed second-nearest reference via bidirectional entailment. The first candidate that passes both directions is returned as `(answer, False)`. If no candidate passes (all fail), the nearest-centroid candidate is returned as `(answer, True)` — is_low_confidence signals the orchestrator. Edge case: when `N == 1`, Stage 2 is skipped entirely (single-agent shortcut at the top of `aggregate`).
+  - **Return type change:** `aggregate` returns `Tuple[str, bool]` (final_answer, is_nli_low_confidence). Callers in `eval/runner._run_condition` and `coordination/orchestrator.run` unpack the tuple and merge the NLI flag into the round-level `is_low_confidence` flag.
   - **Tensor Batching Workaround:** `CrossEncoder.predict()` (the sentence-transformers high-level API) iterates over pairs internally and may issue multiple forward passes. To guarantee a single batched tensor operation, Stage 2 uses raw `transformers.AutoTokenizer` + `AutoModelForSequenceClassification` directly: the two pairs `[A, B]` and `[B, A]` are tokenized together and passed through `model(**inputs)` once, yielding logits of shape `(2, 3)` in one GPU kernel call.
   - **Dynamic Label Resolution:** The entailment class index is read from `model.config.id2label` at runtime (`{v.lower(): int(k) for k, v in ...}`) rather than hardcoded. This makes the code robust to label-order differences between NLI model checkpoints.
-  - **Entailment Failure Policy:** A failed bidirectional check (one or both directions predict contradiction/neutral) logs a `WARNING` but does not suppress the answer. The return type of `aggregate` is `str`; low-confidence signalling is the orchestrator's responsibility via `ConsensusResult.is_low_confidence`.
   - **Test Isolation Strategy:** `tests/conftest.py` contains an `autouse=True` function-scoped fixture that stubs `_embed` (returns `zeros((N, 2))`) and `_batched_entailment` (returns `(True, True)`) for every test in the suite. Orchestrator integration tests run without triggering model downloads. Aggregation unit/integration tests override these stubs per-test with `monkeypatch.setattr`, which shares the same `monkeypatch` instance and reverts cleanly in LIFO order.
 
 ## 4. Fault Models & Injection (`faults/injector.py`) ✅
 Applies mutations to the cached data to simulate three fault conditions at varying fractions (β ∈ {0%, 15%, 30%, 45%}):
 - **F1 (Crash):** Simulate timeout. Agent produces no output (`output_text=""`, `token_logprobs=[]`). Unconditionally dropped by Module 1 (empty logprob branch).
-- **F2 (Byzantine):** Replace output with a pre-specified adversarial wrong answer. Logprobs are spoofed to `−0.02` per entry → `5 × exp(−0.02) ≈ 4.90` mean TopKMass per position → **intentionally passes Module 1** at any realistic τ.
+- **F2 (Byzantine):** Replace output with a pre-specified adversarial wrong answer. Logprobs are spoofed to a valid top-5 distribution `[log(0.95), log(0.02), log(0.015), log(0.010), log(0.005)]` repeated per token → **TopKMass = 1.00 per position** → **intentionally passes Module 1** at any τ ≤ 1.0. Using exactly 1.00 (not ≈0.99) is necessary because high-precision models (e.g., Qwen) produce clean-agent scores up to ~0.9951, which would otherwise inadvertently filter Byzantine agents.
 - **F3 (Drifter):** Replace output with syntactically plausible but semantically off-task text, simulating temperature 1.5. Logprobs are spoofed to `−10.0` per entry → `5 × exp(−10) ≈ 2.3×10⁻⁴` mean TopKMass → **intentionally fails Module 1** at any τ > 0.001.
 - **Implementation notes:**
   - **Entry point:** `inject_faults(generations, beta, fault_type, seed)` where `fault_type ∈ {F1, F2, F3, mix}`.
@@ -97,13 +97,14 @@ Applies mutations to the cached data to simulate three fault conditions at varyi
 - **Output:** Pandas DataFrame exported to CSV tracking Accuracy, Admission Rate, and Fallback Frequency.
 - **Implementation notes:**
   - **Cache format:** JSON file with `{"questions": [{"question_id", "ground_truth", "generations": [{agent fields}]}]}`. Minimum 7 agents per question (to support N=7). `load_cache(filepath)` returns `List[Tuple[str, List[AgentGeneration]]]`.
-  - **Baseline functions (`eval/baselines.py`):** `majority_voting` uses `collections.Counter.most_common(1)`. `soft_weighted_geometric_median` computes per-agent TopKMass mean as weight, runs a weighted Weiszfeld L-BFGS-B minimisation (`_weighted_geometric_median`), returns text of nearest agent. Falls back to uniform weights when all weights < 1e-15 (all F1 agents).
+  - **Baseline functions (`eval/baselines.py`):** `majority_voting(agents)` uses `collections.Counter.most_common(1)` on raw `output_text`. `answer_majority_voting(agents, ground_truth)` extracts comparable answer tokens via `_extract_answer` before counting — this is the correct baseline for paper results since LLM outputs are chain-of-thought strings with unique phrasing. `soft_weighted_geometric_median` computes per-agent TopKMass mean as weight, runs a weighted Weiszfeld L-BFGS-B minimisation (`_weighted_geometric_median`), returns text of nearest agent. Falls back to uniform weights when all weights < 1e-15 (all F1 agents).
+  - **`_run_condition` uses answer-level voting:** The `baseline` and `hard_only` conditions use `answer_majority_voting(agents, ground_truth)`, NOT raw-text `majority_voting`. Raw-text voting causes majority-vote to fail whenever 5 correct agents have different phrasings but 2 wrong agents share the same string (a common scenario with chain-of-thought outputs and coordinated Byzantine agents). The `ground_truth` parameter was added to `_run_condition`'s signature for this purpose.
   - **Embedding reuse in baselines:** `eval/baselines.py` accesses `_embed` via `from pipeline import aggregation as _aggregation; _aggregation._embed(texts)` so that `conftest.py`'s `autouse` monkeypatch on `pipeline.aggregation._embed` applies in tests without extra patching.
-  - **Liveness fallback in runner:** `_run_condition` replicates orchestrator logic directly (`await filter_agents(agents, tau)` + `if len(admitted) < 2f+1: fallback`) without the asyncio.sleep broadcast overhead. `f = (N-1)//3` (BFT standard: N=5→f=1, threshold=3; N=7→f=2, threshold=5).
-  - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types` keyword args (defaulting to the full grid) so tests can pass minimal single-element slices for speed.
+  - **Liveness fallback in runner:** `_run_condition` replicates orchestrator logic directly (`await filter_agents(agents, tau)` + `if len(admitted) < 2f+1: fallback`) without the asyncio.sleep broadcast overhead. `f = (N-1)//3` (BFT standard: N=5→f=1, threshold=3; N=7→f=2, threshold=5). `aggregate()` now returns `Tuple[str, bool]`; `_run_condition` merges the NLI low-confidence flag into the round-level flag via `is_low = is_low or nli_low`.
+  - **Configurable grid:** `run_experiment_1` accepts `n_values`, `beta_values`, `fault_types`, and `dev_fraction` keyword args. `dev_fraction=0.1` (default) reserves the first 10% of questions for τ calibration; the remainder are the evaluation set. For small caches (< 10 questions), `dev_fraction=0.0` is used by tests to avoid consuming all data for calibration.
   - **DataFrame schema:** `condition | n_agents | beta | fault_type | accuracy | admission_rate | fallback_frequency`. 128 rows for the full grid (4 conditions × 2 N × 4 β × 4 fault types). `accuracy` = extracted-answer exact-match fraction (see below); `admission_rate` = mean `n_admitted/N` (always 1.0 for baseline/soft_weighting); `fallback_frequency` = fraction of liveness-fallback rounds.
   - **Answer extraction (`_extract_answer(output_text, ground_truth) -> str`):** Real LLM outputs are chain-of-thought strings, not bare answer tokens. Accuracy is computed on extracted answers: (1) StrategyQA (GT ∈ {"yes","no"}): regex finds the first `\b(yes|no)\b` in the output (case-insensitive); (2) GSM8K (GT is a number string): regex finds all `\$?[\d,]+` tokens, returns the last one stripped of `$` and `,`; (3) Fallback: returns `output_text.strip()` unchanged (preserves exact-match correctness for synthetic test caches).
-  - **Tau auto-calibration (`calibrate_tau(questions, percentile=10.0) -> float`):** `run_experiment_1` accepts `tau: Optional[float] = None`. When `None`, tau is calibrated automatically from the loaded clean agents: compute mean TopKMass for every agent with non-empty logprobs, sort, return the 10th-percentile value. This implements the design-doc §3.2 rule without requiring callers to supply a dataset-specific constant. Real LLM logprobs are a valid probability simplex (top-5 probs sum ≤ 1.0), so empirical clean-agent scores cluster in [0.83, 1.0]; `_DEFAULT_TAU = 1.0` is only suitable for unit-test synthetic logprobs where the top-5 sum can exceed 1.0.
+  - **Tau auto-calibration (`calibrate_tau(questions, percentile=10.0) -> float`):** `run_experiment_1` accepts `tau: Optional[float] = None`. When `None`, tau is calibrated on the dev slice (first `dev_fraction` of questions). Real LLM logprobs are a valid probability simplex (top-5 probs sum ≤ 1.0), so empirical clean-agent scores cluster in [0.83, 1.0]. `_DEFAULT_TAU = 1.0` is only used when the dev slice is empty.
   - **DecentLLMs external baseline (`eval/decent_baseline.py`):** Entry point `run_decent_baseline(agents, num_evaluators=5) -> str`. For each worker: (1) call `_evaluate_candidate(text, evaluator_id)` for each of `N_e=5` evaluators → `(N_e, 5)` score matrix over C=5 criteria (scores 0–20); (2) compute geometric median of that matrix via uniform-weight Weiszfeld (`_weighted_geometric_median` from `eval/baselines.py`); (3) sum the 5 robust-median components → scalar worker score. Winner = highest scalar score; tie-break = largest SHA-256 hex digest of `output_text`. `_evaluate_candidate` is a deterministic mockable helper (SHA-256 seed → `np.random.default_rng`) — no real LLM calls.
 
 ## 6. Live Data Generation (`scripts/generate_cache.py`) ✅
@@ -176,9 +177,11 @@ These numbers provide sanity checks for beta=0 (no-fault) accuracy before fault 
 
 With N=7 agents and majority vote, expect beta=0 accuracy to land between the greedy and N=40 self-consistency figures. Numbers materially below the greedy baseline indicate an infrastructure issue (e.g., token truncation, prompt mismatch) rather than a model limitation.
 
-### 7.6 LLaMA 3.1 8B Results (`cache_llma.json`, `results/experiment_1_llama.csv`)
+### 7.6 LLaMA 3.1 8B Results — DEPRECATED (`results/experiment_1_llama.csv`)
 
-Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N∈{1,5,7} agents, temperature=0.7. Tau auto-calibrated from the 10th percentile of clean-agent TopKMass scores. CSV contains 192 rows (128 for N∈{5,7} + 64 for N=1).
+> **DEPRECATED — raw-text voting bug.** The CSV and tables below were produced with `majority_voting` (raw `output_text`), not answer-level voting. All interpretations of the `baseline` condition are artifacts of the bug. Corrected results are in `results/experiment_1_llama_answer_vote.csv` (pending rerun). Do not cite numbers from this section in the paper.
+
+Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N∈{1,5,7} agents, temperature=0.7. Tau auto-calibrated from the 10th percentile of clean-agent TopKMass scores on the dev slice. CSV contains 192 rows (128 for N∈{5,7} + 64 for N=1).
 
 **Accuracy by beta (averaged over N∈{5,7} and all fault types):**
 
@@ -192,15 +195,17 @@ Generated with `max_tokens=512` for GSM8K, `max_tokens=128` for StrategyQA, N∈
 **Key findings:**
 - Single-agent accuracy (N=1): 0.710 — the no-consensus anchor. All conditions identical at N=1 since there is nothing to filter or aggregate.
 - Clean accuracy (β=0%) is 0.71 across all conditions, consistent with published LLaMA 3.1 8B self-consistency performance on GSM8K + StrategyQA combined.
-- `baseline` collapses completely at β≥0.30 (majority vote is overwhelmed when ~2 of 5 agents are faulty).
+- `baseline` collapses at β≥0.30 — majority vote is overwhelmed when ~2 of 5 agents are faulty. **Note:** these results were produced with raw-text majority voting (a bug — voting on full `output_text` rather than extracted answers). Corrected results using answer-level voting are in `results/experiment_1_llama_answer_vote.csv` and will differ, especially for GSM8K where every chain-of-thought string is unique.
 - `full_system` maintains **0.656 accuracy at β=0.45** — the primary paper result. Delta vs baseline at β=0.45: **+0.656**.
 - Fallback frequency at β=0%: 9.5% (healthy — tau calibration is not over-filtering clean agents).
-- F2 (Byzantine) is the hardest fault type for `full_system` (0.570 at β=0.45 vs 0.675 for F1/F3) because spoofed logprobs of −0.02 pass Module 1; semantic aggregation in Module 2 must do all the work.
+- F2 (Byzantine) is the hardest fault type for `full_system` (0.570 at β=0.45 vs 0.675 for F1/F3) because spoofed logprobs pass Module 1; semantic aggregation in Module 2 must do all the work.
 - F1 (crash) and F3 (drifter) are cleanly filtered by Module 1, explaining their higher `full_system` accuracy.
 
 **Interpretation:** The accuracy-vs-β curve for `full_system` is nearly flat from 0% to 30% fault load, then degrades gracefully to 0.656 at 45%. This is the core claim: BFT-inspired filtering + semantic aggregation provides robustness that majority voting cannot.
 
-### 7.7 Qwen2.5 7B Results (`cache_qwen.json`, `results/experiment_1_qwen.csv`)
+### 7.7 Qwen2.5 7B Results — DEPRECATED (`results/experiment_1_qwen.csv`)
+
+> **DEPRECATED — raw-text voting bug.** Same caveat as §7.6. Corrected results pending in `results/experiment_1_qwen_answer_vote.csv`.
 
 Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=128` StrategyQA, N∈{1,5,7}, temperature=0.7). Tau auto-calibrated per-cache. CSV contains 192 rows (128 for N∈{5,7} + 64 for N=1).
 
@@ -216,7 +221,7 @@ Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=
 **Key findings:**
 - Single-agent accuracy (N=1): 0.690 — the no-consensus anchor for Qwen.
 - `full_system` accuracy is essentially flat across all fault fractions (0.660–0.665) — stronger robustness than LLaMA.
-- `baseline` collapses at β≥0.30 identically to LLaMA, confirming the failure mode is architectural (majority vote), not model-specific.
+- `baseline` collapses at β≥0.30 identically to LLaMA, confirming the failure mode is architectural (majority vote), not model-specific. **Note:** same raw-text voting caveat applies as in §7.6 — corrected results in `results/experiment_1_qwen_answer_vote.csv`.
 - F2 (Byzantine) remains the hardest fault type: `full_system` scores 0.620 at β=0.45 vs 0.675–0.680 for F1/F3/mix.
 - Fallback frequency at β=0%: 8.5% — comparable to LLaMA (9.5%), confirming tau calibration generalises across model families.
 
@@ -231,32 +236,26 @@ Generated with identical settings to LLaMA (`max_tokens=512` GSM8K, `max_tokens=
 
 **Interpretation:** Both models show identical qualitative behaviour — `baseline` collapses under fault load while `full_system` remains robust — demonstrating that the pipeline's fault tolerance is model-agnostic. Qwen's flatter curve (variance < 0.005 across all β) makes it the stronger robustness demonstration; LLaMA's higher clean accuracy (0.710 vs 0.660) makes it the stronger absolute-performance result.
 
-### 7.8 Figures (`figures/`)
+### 7.8 Figures (`figures/`) — PENDING REGENERATION
 
-Two figures are generated by `scripts/plot_results.py` from the merged 192-row CSVs.
+> **PENDING.** Figures have not yet been regenerated with answer-level voting results. The descriptions below are intended behaviour once `results/experiment_1_*_answer_vote.csv` files are produced and `scripts/plot_results.py` is run. Do not treat figure descriptions as observed results.
+
+Two figures are generated by `scripts/plot_results.py` from the merged 192-row `*_answer_vote.csv` files.
 
 #### Figure 1: `figures/accuracy_vs_beta.png` — Accuracy vs. Fault Fraction
 
 Two-panel line chart (LLaMA left, Qwen right). X-axis: β ∈ {0%, 15%, 30%, 45%}. Y-axis: accuracy. Five series per panel:
-- **Single Agent (N=1, dotted grey):** Flat reference line at 0.71 (LLaMA) / 0.69 (Qwen). No consensus, no fault resilience. **Caveat:** This line is flat not because a single agent is fault-tolerant, but because `inject_faults` injects `floor(N × β)` faults — at N=1, `floor(1 × 0.45) = 0` for all β < 1.0, so the single agent is always evaluated on a clean, unmodified output. The line represents a *permanently clean* single agent, not a single agent subject to the same fault rate as the other conditions. The correct reading is: "our full system at β=45% approaches the accuracy of a guaranteed-clean single agent, even when 45% of the pool is faulty." A separate set of figures (`figures/accuracy_vs_beta_no_n1.png`, `figures/fault_type_breakdown_no_n1.png`) omits this line to avoid visual confusion in the main paper body.
-- **Self-Consistency / baseline (red dashed):** Matches single-agent at β=0–15%, then collapses to ~0% at β=30–45%. Visually disappears into the x-axis.
-- **Soft-Weighted SC (orange dotted):** Degrades more gracefully than baseline but still falls to 36–34% at β=45%.
-- **Hard Filter + Majority / hard_only (blue dash-dot):** Better than soft-weighting at β=30%, but drops to 29% at β=45% as Module 1 fallback fires more frequently.
-- **Full System / full_system (green solid):** Nearly flat across all β. LLaMA: 0.70→0.72→0.72→0.66; Qwen: 0.66→0.67→0.67→0.66. Remains well above the single-agent reference line at high fault loads.
-
-**Key visual story:** At β=30–45%, the full system line is the only one that stays near or above the single-agent reference; all baselines fall far below it.
+- **Single Agent (N=1, dotted grey):** Flat reference line — always evaluated on an unmodified output since `floor(1 × β) = 0` for β < 1.0. Represents a permanently clean single agent, not one subject to the same fault rate. Correct reading: "our full system at β=45% approaches the accuracy of a guaranteed-clean single agent, even when 45% of the pool is faulty." Supplementary figures (`figures/accuracy_vs_beta_no_n1.png`) omit this line.
+- **Self-Consistency / baseline (red dashed):** Expected to degrade under fault load; exact shape depends on corrected answer-voting results.
+- **Soft-Weighted SC (orange dotted):** Expected to degrade more gracefully than baseline.
+- **Hard Filter + Majority / hard_only (blue dash-dot):** Expected to hold better at β=30% but degrade at β=45%.
+- **Full System / full_system (green solid):** Expected to remain nearly flat. Update with actual numbers after rerun.
 
 #### Figure 2: `figures/fault_type_breakdown.png` — Accuracy by Fault Type at β=45%
 
-Two-panel grouped bar chart. X-axis: fault types F1 (Crash), F2 (Byzantine), F3 (Drifter), Mix. Two bars per group: Self-Consistency (red) and Full System (green).
-- **Self-Consistency bars:** Near-zero across all fault types and both models — the red bars are barely visible.
-- **Full System bars:** 57–71% across all fault types (LLaMA) and 62–68% (Qwen).
-- **F2 (Byzantine) is visibly shorter** than F1/F3/Mix for both models, confirming that spoofed high-confidence logprobs that pass Module 1 are the hardest fault to handle — Module 2 must do all the work.
-- **Mix fault type** achieves the highest `full_system` accuracy (0.705 LLaMA, 0.680 Qwen) because the mixture of F1/F2/F3 means fewer pure Byzantine agents than the worst-case F2-only scenario.
+Two-panel grouped bar chart. X-axis: fault types F1 (Crash), F2 (Byzantine), F3 (Drifter), Mix. Two bars per group: Self-Consistency (red) and Full System (green). Expected: F2 (Byzantine) will be the hardest fault type for `full_system` because spoofed TopKMass = 1.0 passes Module 1 — Module 2 must do all the work.
 
-**Key visual story:** The full system maintains meaningful accuracy under every fault type at maximum fault load; self-consistency provides zero resilience regardless of fault type.
-
-**Paper caption note:** Include the following explanation in the figure caption: *"Self-Consistency (Majority Vote) collapses to 0% under all fault types because 2 coordinated Byzantine agents share the same wrong answer, outvoting 3 clean agents whose correct answers are phrased differently."*
+**Paper caption note (draft):** *"Self-Consistency (Majority Vote) degrades under fault load because Byzantine agents concentrate votes on a wrong answer while clean agents may split votes across correct answers. Results shown use answer-level majority voting (extracting the final answer from each chain-of-thought before counting votes)."*
 
 ---
 
@@ -305,14 +304,17 @@ is_correct = _extract_answer(gen.output_text, ground_truth) == ground_truth.stri
 
 | File | Description |
 |---|---|
-| `results/experiment_2_signals.csv` | Per-agent DataFrame: `question_id, topk_mass, neg_entropy, neg_logprob_var, is_correct` |
-| `results/experiment_2_signals.png` | 3-panel figure (ROC, scatter, PR) |
+| `results/experiment_2_signals.csv` | Per-agent DataFrame: `question_id, topk_mass, neg_entropy, neg_logprob_var, is_correct, fault_type, is_faulty` |
+| `results/experiment_2_signals.png` | 3-panel figure (clean run) or 4-panel figure (with fault injection) |
+
+`fault_type` is `"clean"` for original cache agents. When `--include-faults` is used, injected agents appear as rows with `fault_type ∈ {"F2","F3"}` and `is_faulty=True`.
 
 ### 8.5 Figure Panels
 
 - **Panel A (ROC Curves):** One line per signal with AUC in legend. Gray dashed chance diagonal.
 - **Panel B (Scatter):** TopKMass score vs. jittered correctness label. Vertical median lines per class (correct / incorrect) show distributional separation.
 - **Panel C (Precision-Recall):** One line per signal with Average Precision in legend. Gray dashed random-classifier baseline.
+- **Panel D (Fault Detection ROC, only when `--include-faults`):** `−TopKMass` as a fault detector — lower TopKMass → more likely faulty. AUC quantifies how well the filter signal separates injected-fault agents from clean ones.
 
 ### 8.6 How to Run
 
@@ -320,6 +322,10 @@ is_correct = _extract_answer(gen.output_text, ground_truth) == ground_truth.stri
 # On a specific cache (CPU only):
 python -m eval.signal_quality --cache cache_llma.json --output-dir results/exp2_llama/
 python -m eval.signal_quality --cache cache_qwen.json --output-dir results/exp2_qwen/
+
+# With fault injection analysis (adds Panel D):
+python -m eval.signal_quality --cache cache_llma.json --output-dir results/exp2_llama/ \
+    --include-faults --beta 0.3 --fault-types F2 F3
 ```
 
 ### 8.7 Results (`cache_llma.json` + `cache_qwen.json`, 700 agents each)
@@ -365,19 +371,19 @@ Separately: does the geometric median genuinely resist being dragged more than a
 
 ### 9.3 Three Coordination Degrees
 
-**Uncoordinated**: The f=2 Byzantine agents act independently and produce semantically different wrong texts — one uses `_F2_TEXT` ("WRONG: The answer is definitively incorrect."), the other uses `_F3_TEXT` (Arctic terns off-topic text). Both use logprobs = −0.02 so they pass Module 1. Because they embed far apart in semantic space, the geometric median cannot be dragged to a coherent adversarial location.
+**Uncoordinated**: The f=2 Byzantine agents act independently and produce semantically different wrong texts — one uses `_F2_TEXT` ("WRONG: The answer is definitively incorrect."), the other uses `_F3_TEXT` (Arctic terns off-topic text). Both use `_COORD_LOGPROBS_PER_TOKEN` (top-5 distribution summing to exactly 1.00 TopKMass per position) so they pass Module 1. Because they embed far apart in semantic space, the geometric median cannot be dragged to a coherent adversarial location.
 
-**Coordinated**: Both agents produce the exact same wrong answer derived from ground truth (`"The answer is {opposite}."` for yes/no; `"The answer is {gt+7}."` for GSM8K). Logprobs = −0.02. They cluster at a single point in embedding space, exerting a coherent pull on the geometric median.
+**Coordinated**: Both agents produce the exact same wrong answer derived from ground truth (`"The answer is {opposite}."` for yes/no; `"The answer is {gt+7}."` for GSM8K). Same `_COORD_LOGPROBS_PER_TOKEN` distribution (TopKMass = 1.00). They cluster at a single point in embedding space, exerting a coherent pull on the geometric median.
 
-**Maximally Adversarial**: Identical to coordinated but with logprobs = −0.01 (even higher spoofed confidence — `5 × exp(−0.01) ≈ 4.95` TopKMass per position, trivially above any realistic τ). This is the hardest possible attack: coordinated cluster + max-confidence spoofing.
+**Maximally Adversarial**: Identical to coordinated but uses `_MAX_ADV_LOGPROBS_PER_TOKEN` — a slightly higher-confidence top-5 distribution also summing to 1.00 TopKMass per position. Conceptually the hardest attack (coordinated cluster + maximum-confidence spoofing), but numerically equivalent to coordinated in terms of Module 1 admission since both achieve TopKMass = 1.00.
 
 ### 9.4 Three Pipeline Conditions
 
-**majority_voting**: No filter; `Counter(output_text).most_common(1)`. Vulnerable to coordinated attack because 2 identical wrong votes can beat a diverse correct majority of 5.
+**majority_answer_vote**: No filter; extracts answers via `_extract_answer` then votes with `Counter`. Vulnerable to coordinated attack because 2 identical wrong votes can beat a diverse correct majority of 5.
 
 **stage1_only**: Module 1 filter + liveness fallback → geometric median nearest-neighbor (no NLI Stage 2). Implemented in `eval/adversarial_test._aggregate_stage1_only` using `pipeline.aggregation._embed` and `_geometric_median` directly.
 
-**full_pipeline**: Module 1 filter + `pipeline.aggregation.aggregate()` — full Stage 1 geometric median + Stage 2 bidirectional NLI entailment check.
+**full_pipeline**: Module 1 filter + `pipeline.aggregation.aggregate()` — full Stage 1 geometric median + Stage 2 bidirectional NLI entailment check. Stage 2 now actively affects selection: candidates are iterated nearest-to-median first; the first candidate that passes bidirectional entailment with the second-nearest (reference) is returned. If no candidate passes, nearest is returned with `is_low_confidence=True`. Returns `Tuple[str, bool]`.
 
 ### 9.5 Centroid Shift Metric
 
@@ -421,17 +427,19 @@ python -m eval.adversarial_test --cache cache.json --output-dir results/exp3_smo
 
 | Coordination | Pipeline condition | LLaMA acc | Qwen acc |
 |---|---|---|---|
-| Uncoordinated | majority_voting | 3% | 1% |
+| Uncoordinated | majority_answer_vote | 3% | 1% |
 | Uncoordinated | stage1_only | 69% | 65% |
 | Uncoordinated | full_pipeline | 69% | 65% |
-| Coordinated | majority_voting | 1% | 0% |
+| Coordinated | majority_answer_vote | 1% | 0% |
 | Coordinated | stage1_only | 69% | 66% |
 | Coordinated | full_pipeline | 69% | 66% |
-| Maximally Adversarial | majority_voting | 1% | 0% |
+| Maximally Adversarial | majority_answer_vote | 1% | 0% |
 | Maximally Adversarial | stage1_only | 69% | 66% |
 | Maximally Adversarial | full_pipeline | 69% | 66% |
 
-Fallback frequency: 7% on both models across all conditions (pre-existing F1_crash agents in the raw cache drop the admitted pool below 2f+1=5 on ~7 questions).
+**Note:** These results predate Fix 4 (Stage 2 NLI now actively affects candidate selection). Under coordinated/maximally_adversarial attacks, `full_pipeline` accuracy is expected to be ≥ `stage1_only` after re-running with the corrected `aggregate()`. The table above shows no difference because the old Stage 2 always returned the nearest candidate regardless of entailment outcome.
+
+Fallback frequency: 7% on both models across all conditions (pre-existing F1_crash agents in the raw cache drop the admitted pool below 2f+1=5 on ~7 questions). The `nli_fallback_frequency` column in the new CSV tracks how often Stage 2 had to fall back to nearest due to all candidates failing entailment.
 
 **Centroid shift (avg distance to clean cluster centroid, lower = more robust):**
 
@@ -448,11 +456,11 @@ Positive delta confirms geometric median stays ~0.24–0.29 embedding units clos
 
 **Key findings:**
 
-**1. Majority voting is catastrophically broken.** With 5 diverse clean agents (each unique chain-of-thought, 1 vote each) and 2 coordinated adversaries sharing the same wrong text (2 votes), the adversaries win the plurality on almost every question. The coordinated case (0-1%) is worse than uncoordinated (1-3%) because in the uncoordinated case the two adversaries use different texts and can't form a plurality either — the "winner" is random among all 7, giving ~1-3% by chance extraction.
+**1. The accuracy table for `majority_answer_vote` is stale — Experiment 3 must be rerun.** The 1-3% values in the table above came from the old `majority_voting` (raw-text) code. With answer-level extraction, the 5 clean agents each vote for their extracted correct answer and 2 Byzantine agents vote for their extracted wrong answer. If all 5 clean agents are individually correct, the vote is 5:2 and majority voting wins easily. The vulnerability is more subtle: clean-agent individual accuracy is ~69–71%, so on average ~1.5 of 5 clean agents extract a wrong answer themselves. Effective vote ratio under coordinated attack: ~3.5 correct vs ~3.5 wrong (2 Byzantine + ~1.5 wrong clean). At p=0.71 (LLaMA), `majority_answer_vote` barely wins most questions; at p=0.69 (Qwen), it barely loses. Expect corrected results to show ~50–60% accuracy, not 1–3%, once Experiment 3 is rerun.
 
 **2. Geometric median is robust — and coordination degree is irrelevant.** `stage1_only` holds steady at the clean baseline accuracy (LLaMA 69%, Qwen 65-66%) across all three coordination degrees. This is the BFT guarantee: with f=2 < N/3 (2/7 ≈ 28.6% < 33.3%), the geometric median minimiser Σ‖x_i − y‖ provably converges to the honest majority cluster regardless of where the f adversarial points are placed. Whether the 2 adversaries cluster together or spread apart does not matter — the 5-vs-2 geometry is sufficient.
 
-**3. Stage 2 NLI adds no accuracy benefit.** `stage1_only == full_pipeline` on both models and all conditions. This is by design: `aggregate()` logs a warning on entailment failure but returns the geometric-median candidate unchanged. Stage 2 is an anomaly detector (surfaced via WARNING logs and `is_low_confidence`), not a correction mechanism. The NLI warnings do increase under maximally_adversarial, confirming Stage 2 is detecting the attack — it simply does not override the geometric median's already-correct selection.
+**3. Stage 2 NLI now actively affects candidate selection (post-Fix 4) — but has a self-check limitation.** After Fix 4, `aggregate()` iterates candidates nearest-to-median first and returns the first that passes bidirectional entailment against a fixed reference (second-nearest). Under coordinated attacks where the wrong-answer cluster is nearest, Stage 2 may reject it. **Caveat:** if the nearest candidate fails NLI, the next candidate tested is the second-nearest — which is also the reference, so it is compared against itself and trivially passes. In practice Stage 2 chooses between the nearest and second-nearest candidates. Whether the second-nearest is correct depends on the embedding geometry under attack and cannot be assumed without measurement. Do not claim Stage 2 "reliably selects the correct answer under coordinated attack" until Experiment 3 is rerun with Fix 4 active. The results table above shows the pre-Fix 4 behavior.
 
 **4. The BFT guarantee is model-agnostic.** LLaMA and Qwen show identical qualitative behaviour. The 1-2% accuracy gap between models reflects their slightly different baseline correctness rates (LLaMA 69% vs Qwen 65-67% on this question set), not differential robustness.
 

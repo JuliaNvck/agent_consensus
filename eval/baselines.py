@@ -18,6 +18,22 @@ def majority_voting(agents: List[AgentGeneration]) -> str:
     return Counter(g.output_text for g in agents).most_common(1)[0][0]
 
 
+def answer_majority_voting(
+    agents: List[AgentGeneration],
+    ground_truth: str,
+) -> str:
+    """Vote over extracted answers, not raw output_text.
+
+    Uses _extract_answer to normalize each output before counting, so agents
+    with different CoT phrasings but the same final answer are counted together.
+    """
+    from eval.runner import _extract_answer
+    if not agents:
+        return ""
+    answers = [_extract_answer(g.output_text, ground_truth) for g in agents]
+    return Counter(answers).most_common(1)[0][0]
+
+
 def _weighted_geometric_median(
     embeddings: np.ndarray, weights: np.ndarray
 ) -> np.ndarray:

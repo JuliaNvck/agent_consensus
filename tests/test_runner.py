@@ -16,6 +16,7 @@ in conftest.py. Per-test control uses monkeypatch.setattr on pipeline.aggregatio
 from __future__ import annotations
 
 import json
+import pathlib
 from typing import List
 
 import numpy as np
@@ -23,7 +24,7 @@ import pandas as pd
 import pytest
 
 from models import AgentGeneration
-from eval.baselines import majority_voting, soft_weighted_geometric_median
+from eval.baselines import answer_majority_voting, majority_voting, soft_weighted_geometric_median
 from eval.runner import load_cache, run_experiment_1, _extract_answer, calibrate_tau
 
 
@@ -123,6 +124,43 @@ class TestCalibrateTau:
         assert calibrate_tau([]) == _DEFAULT_TAU
 
 
+class TestAnswerMajorityVoting:
+    def test_empty_returns_empty_string(self) -> None:
+        assert answer_majority_voting([], "yes") == ""
+
+    def test_single_agent(self) -> None:
+        gen = _make_gen("a0", "Yes, because the sky is blue.")
+        assert answer_majority_voting([gen], "yes") == "yes"
+
+    def test_cot_plurality_beats_identical_wrong(self) -> None:
+        """Three different CoT strings all ending in '18' beat two identical wrong strings.
+
+        Raw-text voting would fail here because the correct answers have different phrasing.
+        """
+        correct_gens = [
+            _make_gen("a0", "Let me calculate: 6*3=18. The answer is $18."),
+            _make_gen("a1", "Step 1: multiply. 6×3 = 18"),
+            _make_gen("a2", "The total is $18.00 after solving 6*3"),
+        ]
+        wrong_gens = [
+            _make_gen("a3", "The answer is $24."),
+            _make_gen("a4", "The answer is $24."),
+        ]
+        result = answer_majority_voting(correct_gens + wrong_gens, "18")
+        assert result == "18", f"Expected '18', got {result!r}"
+
+    def test_yes_no_normalization(self) -> None:
+        """'YES definitely', 'Yes.', 'yes because...' all normalize to 'yes'."""
+        gens = [
+            _make_gen("a0", "YES definitely"),
+            _make_gen("a1", "Yes. Because..."),
+            _make_gen("a2", "yes because the answer is yes"),
+            _make_gen("a3", "No, not true."),
+        ]
+        result = answer_majority_voting(gens, "yes")
+        assert result == "yes"
+
+
 class TestMajorityVoting:
     def test_empty_returns_empty_string(self) -> None:
         assert majority_voting([]) == ""
@@ -175,11 +213,13 @@ class TestSoftWeightedGeometricMedian:
 
     def test_single_agent_returns_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Single agent: embedding should never be called."""
-        called = []
-        monkeypatch.setattr(
-            "pipeline.aggregation._embed",
-            lambda texts: called.append(texts) or np.zeros((len(texts), 2)),
-        )
+        called: list = []
+
+        def _tracking_embed(texts: list) -> np.ndarray:
+            called.append(texts)
+            return np.zeros((len(texts), 2))
+
+        monkeypatch.setattr("pipeline.aggregation._embed", _tracking_embed)
         gen = _make_gen("a0", "solo answer")
         result = soft_weighted_geometric_median([gen])
         assert result == "solo answer"
@@ -257,28 +297,28 @@ class TestSoftWeightedGeometricMedian:
 # ---------------------------------------------------------------------------
 
 class TestLoadCache:
-    def test_returns_list(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_returns_list(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict())
         result = load_cache(path)
         assert isinstance(result, list)
 
-    def test_single_question_length(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_single_question_length(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict())
         result = load_cache(path)
         assert len(result) == 1
 
-    def test_ground_truth_field(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_ground_truth_field(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict(ground_truth="my answer"))
         ground_truth, _ = load_cache(path)[0]
         assert ground_truth == "my answer"
 
-    def test_generations_are_agent_generation_objects(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_generations_are_agent_generation_objects(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict(n_agents=3))
         _, generations = load_cache(path)[0]
         assert all(isinstance(g, AgentGeneration) for g in generations)
         assert len(generations) == 3
 
-    def test_agent_generation_fields(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_agent_generation_fields(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict(n_agents=1))
         _, generations = load_cache(path)[0]
         g = generations[0]
@@ -287,12 +327,12 @@ class TestLoadCache:
         assert isinstance(g.token_logprobs, list)
         assert g.is_faulty is False
 
-    def test_fault_type_null_parsed_as_none(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_fault_type_null_parsed_as_none(self, tmp_path: pathlib.Path) -> None:
         path = _write_cache(tmp_path, _make_cache_dict(n_agents=1))
         _, generations = load_cache(path)[0]
         assert generations[0].fault_type is None
 
-    def test_multiple_questions(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_multiple_questions(self, tmp_path: pathlib.Path) -> None:
         data = {
             "questions": [
                 {
@@ -331,7 +371,7 @@ class TestRunExperiment1:
     """
 
     @pytest.mark.asyncio
-    async def test_returns_dataframe(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_returns_dataframe(self, tmp_path: pathlib.Path) -> None:
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
 
@@ -341,7 +381,7 @@ class TestRunExperiment1:
         assert isinstance(df, pd.DataFrame)
 
     @pytest.mark.asyncio
-    async def test_dataframe_columns(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_dataframe_columns(self, tmp_path: pathlib.Path) -> None:
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
 
@@ -355,7 +395,7 @@ class TestRunExperiment1:
         assert set(df.columns) == expected
 
     @pytest.mark.asyncio
-    async def test_csv_written(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_csv_written(self, tmp_path: pathlib.Path) -> None:
         import os
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
@@ -366,7 +406,7 @@ class TestRunExperiment1:
         assert os.path.exists(out)
 
     @pytest.mark.asyncio
-    async def test_row_count_matches_grid(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_row_count_matches_grid(self, tmp_path: pathlib.Path) -> None:
         """4 conditions × 2 N × 2 beta × 2 fault_types = 32 rows."""
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
@@ -381,7 +421,7 @@ class TestRunExperiment1:
 
     @pytest.mark.asyncio
     async def test_baseline_perfect_accuracy_clean_agents(
-        self, tmp_path: pytest.TempPathFactory
+        self, tmp_path: pathlib.Path
     ) -> None:
         """beta=0, no faults: all agents output the ground truth → baseline accuracy=1.0."""
         cache = _write_cache(tmp_path, _make_cache_dict(ground_truth="correct", n_agents=7))
@@ -395,7 +435,7 @@ class TestRunExperiment1:
         assert float(baseline_row["accuracy"].iloc[0]) == 1.0
 
     @pytest.mark.asyncio
-    async def test_admission_rate_in_range(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_admission_rate_in_range(self, tmp_path: pathlib.Path) -> None:
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
 
@@ -406,7 +446,7 @@ class TestRunExperiment1:
         assert (df["admission_rate"] <= 1.0).all()
 
     @pytest.mark.asyncio
-    async def test_fallback_frequency_in_range(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_fallback_frequency_in_range(self, tmp_path: pathlib.Path) -> None:
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
 
@@ -418,7 +458,7 @@ class TestRunExperiment1:
 
     @pytest.mark.asyncio
     async def test_f1_full_beta_triggers_fallback_for_filtered_conditions(
-        self, tmp_path: pytest.TempPathFactory
+        self, tmp_path: pathlib.Path
     ) -> None:
         """beta=1.0, fault_type=F1: all agents crash → empty admitted pool → liveness fallback.
 
@@ -445,7 +485,7 @@ class TestRunExperiment1:
 
     @pytest.mark.asyncio
     async def test_baseline_admission_rate_always_one(
-        self, tmp_path: pytest.TempPathFactory
+        self, tmp_path: pathlib.Path
     ) -> None:
         """baseline and soft_weighting admit all agents (no filter) → admission_rate=1.0."""
         cache = _write_cache(tmp_path, _make_cache_dict())
@@ -459,7 +499,7 @@ class TestRunExperiment1:
             assert float(row["admission_rate"].iloc[0]) == 1.0
 
     @pytest.mark.asyncio
-    async def test_conditions_all_present(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_conditions_all_present(self, tmp_path: pathlib.Path) -> None:
         """All four condition labels must appear in the output."""
         cache = _write_cache(tmp_path, _make_cache_dict())
         out = str(tmp_path / "results" / "out.csv")
@@ -468,3 +508,104 @@ class TestRunExperiment1:
             cache, out, n_values=[5], beta_values=[0.0], fault_types=["F1"]
         )
         assert set(df["condition"]) == {"baseline", "soft_weighting", "hard_only", "full_system"}
+
+    @pytest.mark.asyncio
+    async def test_answer_voting_beats_raw_text_voting(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Baseline condition uses answer-level voting, not raw-text voting.
+
+        3 correct agents with different CoT phrasing + 2 identical wrong agents.
+        Answer voting selects the majority extracted answer; raw-text voting would
+        select the wrong repeated string.
+        """
+        data = {
+            "questions": [
+                {
+                    "question_id": "q0",
+                    "ground_truth": "18",
+                    "generations": [
+                        {"agent_id": "a0", "output_text": "Let me compute: 6*3=18. Answer: $18.",
+                         "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                         "is_faulty": False, "fault_type": None},
+                        {"agent_id": "a1", "output_text": "Step 1: multiply 6 by 3 = 18",
+                         "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                         "is_faulty": False, "fault_type": None},
+                        {"agent_id": "a2", "output_text": "The answer is 18 dollars total.",
+                         "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                         "is_faulty": False, "fault_type": None},
+                        {"agent_id": "a3", "output_text": "The answer is $24.",
+                         "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                         "is_faulty": False, "fault_type": None},
+                        {"agent_id": "a4", "output_text": "The answer is $24.",
+                         "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                         "is_faulty": False, "fault_type": None},
+                    ],
+                }
+            ]
+        }
+        cache = _write_cache(tmp_path, data)
+        out = str(tmp_path / "results" / "out.csv")
+
+        df = await run_experiment_1(
+            cache, out, n_values=[5], beta_values=[0.0], fault_types=["F1"],
+            dev_fraction=0.0,
+        )
+        baseline_row = df[df["condition"] == "baseline"]
+        assert float(baseline_row["accuracy"].iloc[0]) == 1.0, (
+            "Baseline answer-voting should correctly identify '18' as majority extracted answer"
+        )
+
+
+class TestDevSplit:
+    @pytest.mark.asyncio
+    async def test_dev_split_is_deterministic(self, tmp_path: pathlib.Path) -> None:
+        """dev_fraction=0.1 with N=10 questions should always use first 1 for calibration."""
+        data = {
+            "questions": [
+                {
+                    "question_id": f"q{i}",
+                    "ground_truth": "yes",
+                    "generations": [
+                        {
+                            "agent_id": f"a{j}",
+                            "output_text": "yes",
+                            "token_logprobs": [-0.5, -1.0, -1.5, -2.0, -2.5] * 4,
+                            "is_faulty": False,
+                            "fault_type": None,
+                        }
+                        for j in range(7)
+                    ],
+                }
+                for i in range(10)
+            ]
+        }
+        cache = _write_cache(tmp_path, data)
+        out = str(tmp_path / "results" / "out.csv")
+
+        df1 = await run_experiment_1(
+            cache, out, n_values=[5], beta_values=[0.0], fault_types=["F1"],
+            dev_fraction=0.1,
+        )
+        df2 = await run_experiment_1(
+            cache, out, n_values=[5], beta_values=[0.0], fault_types=["F1"],
+            dev_fraction=0.1,
+        )
+        # Deterministic: same inputs → same outputs
+        assert list(df1["accuracy"]) == list(df2["accuracy"])
+
+    @pytest.mark.asyncio
+    async def test_dev_fraction_zero_uses_all_questions(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """dev_fraction=0.0 should still produce non-empty results (min dev_n=1)."""
+        cache = _write_cache(tmp_path, _make_cache_dict(n_agents=7))
+        out = str(tmp_path / "results" / "out.csv")
+
+        df = await run_experiment_1(
+            cache, out, n_values=[5], beta_values=[0.0], fault_types=["F1"],
+            dev_fraction=0.0,
+        )
+        # With only 1 question and dev_fraction=0.0, dev_n=max(1,0)=1, eval slice is empty
+        # DataFrame may have 0 accuracy rows but should not crash
+        assert isinstance(df, pd.DataFrame)

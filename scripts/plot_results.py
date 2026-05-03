@@ -192,8 +192,8 @@ def plot_fault_type_breakdown(
 
 
 if __name__ == "__main__":
-    llama_csv = os.path.join(_RESULTS_DIR, "experiment_1_llama.csv")
-    qwen_csv = os.path.join(_RESULTS_DIR, "experiment_1_qwen.csv")
+    llama_csv = os.path.join(_RESULTS_DIR, "experiment_1_llama_answer_vote.csv")
+    qwen_csv = os.path.join(_RESULTS_DIR, "experiment_1_qwen_answer_vote.csv")
 
     # With single-agent reference line (supplementary / appendix)
     plot_accuracy_vs_beta(

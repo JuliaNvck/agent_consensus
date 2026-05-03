@@ -61,7 +61,8 @@ class Orchestrator:
                 is_low_confidence=True,
             )
 
-        final_answer: str = await aggregate(admitted)
+        final_answer, nli_low = await aggregate(admitted)
+        is_low_confidence = is_low_confidence or nli_low
 
         return ConsensusResult(
             final_answer=final_answer,

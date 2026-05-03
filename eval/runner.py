@@ -12,7 +12,7 @@ from models import AgentGeneration
 from pipeline.filter import filter_agents, _compute_topk_mass_trajectory
 from pipeline.aggregation import aggregate
 from faults.injector import inject_faults
-from eval.baselines import majority_voting, soft_weighted_geometric_median
+from eval.baselines import answer_majority_voting, majority_voting, soft_weighted_geometric_median
 
 def _extract_answer(output_text: str, ground_truth: str) -> str:
     """Extract a comparable answer token from a chain-of-thought output.
@@ -94,6 +94,7 @@ async def _run_condition(
     condition: str,
     tau: float,
     f: int,
+    ground_truth: str,
 ) -> Tuple[str, int, bool]:
     """Run one ablation condition on a single question's agent pool.
 
@@ -104,7 +105,7 @@ async def _run_condition(
     n = len(agents)
 
     if condition == "baseline":
-        return majority_voting(agents), n, False
+        return answer_majority_voting(agents, ground_truth), n, False
 
     if condition == "soft_weighting":
         return soft_weighted_geometric_median(agents), n, False
@@ -118,9 +119,10 @@ async def _run_condition(
         is_low = False
 
     if condition == "hard_only":
-        answer = majority_voting(admitted)
+        answer = answer_majority_voting(admitted, ground_truth)
     else:  # full_system
-        answer = await aggregate(admitted)
+        answer, nli_low = await aggregate(admitted)
+        is_low = is_low or nli_low
 
     return answer, len(admitted), is_low
 
@@ -133,6 +135,7 @@ async def run_experiment_1(
     n_values: List[int] = _N_VALUES,
     beta_values: List[float] = _BETA_VALUES,
     fault_types: List[str] = _FAULT_TYPES,
+    dev_fraction: float = 0.1,
 ) -> pd.DataFrame:
     """Ablation study over (N, beta, fault_type) × 4 pipeline conditions.
 
@@ -142,19 +145,26 @@ async def run_experiment_1(
     Args:
         cache_filepath: Path to the Phase 1 JSON generation cache.
         output_filepath: Destination for the results CSV.
-        tau: Module 1 reliability filter threshold.
+        tau: Module 1 reliability filter threshold (auto-calibrated on dev slice if None).
         seed: RNG seed forwarded to inject_faults for determinism.
         n_values: Pool sizes to evaluate (subset of cached agents per question).
         beta_values: Fault fractions to evaluate.
         fault_types: Fault type labels to evaluate.
+        dev_fraction: Fraction of questions used for τ calibration (default 0.1).
 
     Returns:
         DataFrame with columns: condition, n_agents, beta, fault_type,
         accuracy, admission_rate, fallback_frequency.
     """
-    questions = load_cache(cache_filepath)
+    all_questions = load_cache(cache_filepath)
+    dev_n = max(0, int(len(all_questions) * dev_fraction))
     if tau is None:
-        tau = calibrate_tau(questions)
+        tau = calibrate_tau(all_questions[:dev_n] if dev_n > 0 else all_questions)
+    questions = all_questions[dev_n:] if dev_n < len(all_questions) else all_questions
+    print(
+        f"  Calibrated τ={tau:.4f} on {dev_n} dev questions, "
+        f"evaluating on {len(questions)} questions."
+    )
     rows: List[Dict] = []
 
     for n in n_values:
@@ -173,7 +183,7 @@ async def run_experiment_1(
 
                     for condition in _CONDITIONS:
                         answer, n_admitted, is_low = await _run_condition(
-                            faulty, condition, tau, f
+                            faulty, condition, tau, f, ground_truth
                         )
                         accum[condition]["correct"].append(
                             _extract_answer(answer, ground_truth) == ground_truth.strip()

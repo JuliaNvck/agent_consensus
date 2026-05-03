@@ -5,6 +5,8 @@ Computes three per-agent generation signals (TopKMass, Token Entropy, Logprob Va
 labels each generation as correct/incorrect against ground truth, then produces ROC/AUC
 and Precision-Recall curves to validate that TopKMass is the best correctness predictor.
 
+Optionally injects F2/F3 faults to additionally measure fault detectability.
+
 CPU only — no vllm, no torch imports.
 """
 from __future__ import annotations
@@ -24,6 +26,7 @@ from sklearn.metrics import (
 )
 
 from eval.runner import _extract_answer, load_cache
+from faults.injector import inject_faults
 from models import AgentGeneration
 from pipeline.filter import _compute_topk_mass_trajectory
 
@@ -84,25 +87,38 @@ def compute_signals(gen: AgentGeneration) -> Optional[Dict[str, float]]:
     }
 
 
-def analyze_cache(cache_path: str) -> pd.DataFrame:
+def analyze_cache(
+    cache_path: str,
+    include_faults: bool = False,
+    beta: float = 0.3,
+    fault_types: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """Load a generation cache and compute signals + correctness for every agent.
 
+    When include_faults=True, also injects faults for each type in fault_types and
+    includes those rows. Clean rows are labeled fault_type="clean", is_faulty=False.
+
     Returns a DataFrame with columns:
-        question_id, topk_mass, neg_entropy, neg_logprob_var, is_correct
+        question_id, topk_mass, neg_entropy, neg_logprob_var, is_correct,
+        fault_type, is_faulty
     One row per agent generation with non-empty token_logprobs.
     """
+    import json
+
     questions = load_cache(cache_path)
 
     with open(cache_path) as fh:
-        import json
         raw = json.load(fh)
-    qid_map = {q["ground_truth"]: q["question_id"] for q in raw["questions"]}
-    # Build a mapping from (ground_truth index) → question_id
     qid_list = [q["question_id"] for q in raw["questions"]]
+
+    if fault_types is None:
+        fault_types = ["F2", "F3"]
 
     rows: List[Dict] = []
     for idx, (ground_truth, gens) in enumerate(questions):
         question_id = qid_list[idx]
+
+        # Clean agents
         for gen in gens:
             signals = compute_signals(gen)
             if signals is None:
@@ -110,30 +126,58 @@ def analyze_cache(cache_path: str) -> pd.DataFrame:
             is_correct = (
                 _extract_answer(gen.output_text, ground_truth) == ground_truth.strip()
             )
-            rows.append(
-                {
-                    "question_id": question_id,
-                    **signals,
-                    "is_correct": bool(is_correct),
-                }
-            )
+            rows.append({
+                "question_id": question_id,
+                **signals,
+                "is_correct": bool(is_correct),
+                "fault_type": "clean",
+                "is_faulty": False,
+            })
+
+        # Injected-fault agents (optional)
+        if include_faults:
+            for ft in fault_types:
+                injected = inject_faults(gens, beta=beta, fault_type=ft, seed=42)
+                for gen in injected:
+                    if not gen.is_faulty:
+                        continue
+                    signals = compute_signals(gen)
+                    if signals is None:
+                        continue
+                    is_correct = (
+                        _extract_answer(gen.output_text, ground_truth) == ground_truth.strip()
+                    )
+                    rows.append({
+                        "question_id": question_id,
+                        **signals,
+                        "is_correct": bool(is_correct),
+                        "fault_type": ft,
+                        "is_faulty": True,
+                    })
 
     return pd.DataFrame(
         rows,
-        columns=["question_id", "topk_mass", "neg_entropy", "neg_logprob_var", "is_correct"],
+        columns=[
+            "question_id", "topk_mass", "neg_entropy", "neg_logprob_var",
+            "is_correct", "fault_type", "is_faulty",
+        ],
     )
 
 
 def plot_signals(df: pd.DataFrame, output_path: str) -> None:
-    """Generate the 3-panel Experiment 2 figure and save to output_path.
+    """Generate the Experiment 2 figure and save to output_path.
 
-    Panel A: ROC curves for all three signals.
+    Panel A: ROC curves for all three signals (correctness prediction).
     Panel B: Scatter of TopKMass score vs. correctness (jittered).
-    Panel C: Precision-Recall curves for all three signals.
+    Panel C: Precision-Recall curves for all three signals (correctness prediction).
+    Panel D (if faults injected): ROC + PR for fault detection via TopKMass.
     """
+    has_faults = "is_faulty" in df.columns and df["is_faulty"].any()
+    n_panels = 4 if has_faults else 3
+    fig_w = 5 * n_panels
     y_true = df["is_correct"].astype(int).values
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, 5))
 
     # ── Panel A: ROC Curves ────────────────────────────────────────────────────
     ax = axes[0]
@@ -222,8 +266,32 @@ def plot_signals(df: pd.DataFrame, output_path: str) -> None:
     ax.spines["right"].set_visible(False)
     ax.grid(linestyle="--", alpha=0.4)
 
-    fig.suptitle("Signal Quality Analysis: TopKMass vs. Entropy vs. Logprob Variance",
-                 fontsize=14, y=1.01)
+    # ── Panel D: Fault Detection (only when injected faults present) ──────────
+    if has_faults:
+        ax = axes[3]
+        faulty_true = df["is_faulty"].astype(int).values
+        scores = df["topk_mass"].values
+
+        # For fault detection, lower TopKMass → more likely faulty, so invert the score
+        fpr, tpr, _ = roc_curve(faulty_true, -scores)
+        auc = roc_auc_score(faulty_true, -scores)
+        ax.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1, label="Chance")
+        ax.plot(fpr, tpr, color=_COLORS["topk_mass"], linewidth=2,
+                label=f"TopKMass (AUC={auc:.3f})")
+        ax.set_title("Fault Detection ROC\n(−TopKMass as detector)", fontsize=12, fontweight="bold")
+        ax.set_xlabel("False Positive Rate", fontsize=11)
+        ax.set_ylabel("True Positive Rate", fontsize=11)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.legend(fontsize=9, loc="lower right")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(linestyle="--", alpha=0.4)
+
+    title = "Signal Quality Analysis: TopKMass vs. Entropy vs. Logprob Variance"
+    if has_faults:
+        title += "  (+Fault Detection)"
+    fig.suptitle(title, fontsize=14, y=1.01)
     plt.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -231,18 +299,29 @@ def plot_signals(df: pd.DataFrame, output_path: str) -> None:
     plt.close()
 
 
-def run_experiment_2(cache_path: str, output_dir: str = "results") -> pd.DataFrame:
+def run_experiment_2(
+    cache_path: str,
+    output_dir: str = "results",
+    include_faults: bool = False,
+    beta: float = 0.3,
+    fault_types: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """Analyze a generation cache and produce signal quality outputs.
 
     Saves:
         <output_dir>/experiment_2_signals.csv  — per-agent signal DataFrame
-        <output_dir>/experiment_2_signals.png  — 3-panel figure
+        <output_dir>/experiment_2_signals.png  — figure (3 panels clean, 4 panels with faults)
     Returns the DataFrame.
     """
     print(f"Analyzing {cache_path}...")
-    df = analyze_cache(cache_path)
-    print(f"  {len(df)} agent generations | "
-          f"{df['is_correct'].sum()} correct ({df['is_correct'].mean():.1%})")
+    df = analyze_cache(cache_path, include_faults=include_faults, beta=beta,
+                       fault_types=fault_types)
+    n_clean = int((df["fault_type"] == "clean").sum())
+    n_faulty = int(df["is_faulty"].sum()) if include_faults else 0
+    print(f"  {n_clean} clean generations | {df['is_correct'].sum()} correct "
+          f"({df.loc[df['fault_type']=='clean','is_correct'].mean():.1%})")
+    if include_faults:
+        print(f"  {n_faulty} injected-fault generations included")
 
     os.makedirs(output_dir, exist_ok=True)
     csv_path = os.path.join(output_dir, "experiment_2_signals.csv")
@@ -266,5 +345,23 @@ if __name__ == "__main__":
         "--output-dir", default="results",
         help="Directory for output CSV and PNG (default: results/).",
     )
+    parser.add_argument(
+        "--include-faults", action="store_true",
+        help="Also inject faults and include fault detection analysis.",
+    )
+    parser.add_argument(
+        "--beta", type=float, default=0.3,
+        help="Fault injection fraction (default: 0.3).",
+    )
+    parser.add_argument(
+        "--fault-types", nargs="+", default=["F2", "F3"],
+        metavar="FAULT_TYPE",
+        help="Fault types to inject (default: F2 F3).",
+    )
     args = parser.parse_args()
-    run_experiment_2(args.cache, args.output_dir)
+    run_experiment_2(
+        args.cache, args.output_dir,
+        include_faults=args.include_faults,
+        beta=args.beta,
+        fault_types=args.fault_types,
+    )

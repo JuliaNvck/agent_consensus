@@ -3,12 +3,12 @@ TDD tests for faults/injector.py — deterministic fault injection layer.
 
 Fault types:
   F1 (Crash)     — empty text + empty logprobs; always dropped by Module 1.
-  F2 (Byzantine) — adversarial text + peaked logprobs; intentionally PASSES Module 1.
+  F2 (Byzantine) — adversarial text + valid top-5 distribution; intentionally PASSES Module 1.
   F3 (Drifter)   — off-task text + flat logprobs; intentionally FAILS Module 1.
 
 Spoofing math (verified via pipeline.filter._compute_topk_mass_trajectory):
-  F2: logprob = -0.02 → 5×exp(-0.02) ≈ 4.90 per position  → mean TopKMass ≈ 4.90
-  F3: logprob = -10.0 → 5×exp(-10)   ≈ 2.3e-4 per position → mean TopKMass ≈ 2.3e-4
+  F2: valid top-5 dist [0.95, 0.02, 0.015, 0.010, 0.005] → TopKMass = 1.00 per position
+  F3: logprob = -10.0 → 5×exp(-10) ≈ 2.3e-4 per position → mean TopKMass ≈ 2.3e-4
 """
 
 import math
@@ -172,18 +172,28 @@ class TestF2Fault:
         result = inject_faults(_make_clean_gens(3), beta=1.0, fault_type="F2", seed=0)
         assert all(len(g.token_logprobs) % 5 == 0 for g in result)
 
+    def test_f2_logprobs_per_token_valid_probability(self) -> None:
+        """F2 top-5 mass per token must be a valid probability (≤ 1.0)."""
+        result = inject_faults(_make_clean_gens(3), beta=1.0, fault_type="F2", seed=0)
+        for gen in result:
+            lps = gen.token_logprobs
+            T = len(lps) // 5
+            for i in range(T):
+                token_mass = sum(math.exp(lps[i * 5 + j]) for j in range(5))
+                assert token_mass <= 1.0 + 1e-9, f"Token {i} mass {token_mass:.4f} exceeds 1.0"
+
     def test_f2_logprobs_produce_high_topk_mass(self) -> None:
-        """F2 mean TopKMass must exceed 2.0 — well clear of any realistic tau."""
+        """F2 mean TopKMass must equal 1.0 — guaranteed to clear any realistic tau."""
         result = inject_faults(_make_clean_gens(3), beta=1.0, fault_type="F2", seed=0)
         for gen in result:
             traj = _compute_topk_mass_trajectory(gen.token_logprobs)
-            assert float(traj.mean()) > 2.0
+            assert float(traj.mean()) > 0.99
 
     @pytest.mark.asyncio
     async def test_f2_passes_module1_filter(self) -> None:
-        """F2 agents must pass filter_agents at tau=1.0."""
+        """F2 agents must pass filter_agents at tau=0.9952 (Qwen dev-slice tau upper bound)."""
         result = inject_faults(_make_clean_gens(5), beta=1.0, fault_type="F2", seed=0)
-        admitted = await filter_agents(result, tau=1.0)
+        admitted = await filter_agents(result, tau=0.9952)
         assert len(admitted) == len(result)
 
 

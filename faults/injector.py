@@ -6,8 +6,13 @@ from typing import List
 
 from models import AgentGeneration
 
-# F2 (Byzantine): peaked logprobs → 5×exp(-0.02) ≈ 4.90 per position → HIGH TopKMass
-_F2_LOGPROB: float = -0.02
+# F2 (Byzantine): valid top-5 distribution — TopKMass = 1.00 per position → PASSES Module 1
+# Probs sum to exactly 1.0 so this clears any realistic tau, including high-precision models
+# like Qwen whose dev-slice tau can reach ~0.9951.
+_F2_LOGPROBS_PER_TOKEN: List[float] = [
+    math.log(0.95), math.log(0.02), math.log(0.015),
+    math.log(0.010), math.log(0.005),
+]
 
 # F3 (Drifter): flat logprobs → 5×exp(-10.0) ≈ 2.3e-4 per position → LOW TopKMass
 _F3_LOGPROB: float = -10.0
@@ -74,7 +79,7 @@ def _apply_fault(gen: AgentGeneration, fault_type: str) -> AgentGeneration:
         return AgentGeneration(
             agent_id=gen.agent_id,
             output_text=_F2_TEXT,
-            token_logprobs=[_F2_LOGPROB] * (T * 5),
+            token_logprobs=_F2_LOGPROBS_PER_TOKEN * T,
             is_faulty=True,
             fault_type="F2_byzantine",
         )

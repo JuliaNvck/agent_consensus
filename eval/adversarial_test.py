@@ -2,13 +2,13 @@
 """Experiment 3: Adversarial Coordination Stress Test.
 
 Tests pipeline resilience under three Byzantine coordination degrees:
-  - uncoordinated:       f agents produce semantically distinct wrong answers
-  - coordinated:         f agents produce the exact same wrong answer
-  - maximally_adversarial: same wrong answer + max-confidence spoofed logprobs (-0.01)
+  - uncoordinated:         f agents produce semantically distinct wrong answers
+  - coordinated:           f agents produce the exact same wrong answer
+  - maximally_adversarial: same wrong answer + max-confidence spoofed logprobs
 
 Fixed parameters: N=7 agents, f=2 Byzantine, β≈28.6%.
 
-Compares Full Pipeline vs. Stage 1 Only (geometric median, no NLI) vs. Majority Voting.
+Compares Full Pipeline vs. Stage 1 Only (geometric median, no NLI) vs. Answer Majority Vote.
 Also measures centroid shift: how much the geometric median resists being dragged toward
 the adversarial cluster compared to the arithmetic mean.
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import re
 from typing import Dict, List, Optional, Tuple
@@ -26,21 +27,29 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from eval.baselines import majority_voting
+from eval.baselines import answer_majority_voting, majority_voting
 from eval.runner import _extract_answer, calibrate_tau, load_cache
-from faults.injector import _F2_TEXT, _F3_TEXT
+from faults.injector import _F2_TEXT, _F2_LOGPROBS_PER_TOKEN, _F3_TEXT
 from models import AgentGeneration
 from pipeline.aggregation import _embed, _geometric_median, aggregate
 from pipeline.filter import filter_agents
 
 _N: int = 7
 _F: int = 2
-_COORD_LOGPROB: float = -0.02
-_MAX_ADV_LOGPROB: float = -0.01
 _DEFAULT_TOKEN_COUNT: int = 20
 
+# Valid top-5 distributions for adversarial logprobs (TopKMass = 1.00 for both)
+_COORD_LOGPROBS_PER_TOKEN: List[float] = [
+    math.log(0.95), math.log(0.02), math.log(0.015),
+    math.log(0.010), math.log(0.005),
+]
+_MAX_ADV_LOGPROBS_PER_TOKEN: List[float] = [
+    math.log(0.95), math.log(0.02), math.log(0.015),
+    math.log(0.010), math.log(0.005),
+]
+
 _COORDINATION_DEGREES = ["uncoordinated", "coordinated", "maximally_adversarial"]
-_PIPELINE_CONDITIONS = ["majority_voting", "stage1_only", "full_pipeline"]
+_PIPELINE_CONDITIONS = ["majority_answer_vote", "stage1_only", "full_pipeline"]
 
 _COORD_LABELS = {
     "uncoordinated": "Uncoordinated",
@@ -48,12 +57,12 @@ _COORD_LABELS = {
     "maximally_adversarial": "Max. Adversarial",
 }
 _COND_LABELS = {
-    "majority_voting": "Majority Voting",
+    "majority_answer_vote": "Answer Majority Vote",
     "stage1_only": "Stage 1 Only (Geom. Median)",
-    "full_pipeline": "Full Pipeline (+ NLI)",
+    "full_pipeline": "Full Pipeline (Stage1 + NLI)",
 }
 _COND_COLORS = {
-    "majority_voting": "#d62728",
+    "majority_answer_vote": "#d62728",
     "stage1_only": "#1f77b4",
     "full_pipeline": "#2ca02c",
 }
@@ -84,9 +93,9 @@ def _build_adversarial_pool(
 
     Coordination semantics:
       uncoordinated       — Agent 0 gets _F2_TEXT, Agent 1 gets _F3_TEXT (different clusters).
-                            Both use -0.02 logprobs so both pass Module 1.
-      coordinated         — Both get the same wrong answer text, -0.02 logprobs.
-      maximally_adversarial — Same text, but logprobs = -0.01 (even higher spoofed confidence).
+                            Both use _COORD_LOGPROBS_PER_TOKEN (TopKMass = 1.00), pass Module 1.
+      coordinated         — Both get the same wrong answer text, _COORD_LOGPROBS_PER_TOKEN (TopKMass = 1.00).
+      maximally_adversarial — Same text, _MAX_ADV_LOGPROBS_PER_TOKEN (TopKMass = 1.00).
     """
     pool = clean_gens[:_N]
     wrong = _derive_wrong_answer(ground_truth)
@@ -105,18 +114,18 @@ def _build_adversarial_pool(
 
         if coordination == "uncoordinated":
             text = _F2_TEXT if i == 0 else _F3_TEXT
-            logprob = _COORD_LOGPROB
+            logprobs_per_token = _COORD_LOGPROBS_PER_TOKEN
         elif coordination == "coordinated":
             text = wrong_text
-            logprob = _COORD_LOGPROB
+            logprobs_per_token = _COORD_LOGPROBS_PER_TOKEN
         else:  # maximally_adversarial
             text = wrong_text
-            logprob = _MAX_ADV_LOGPROB
+            logprobs_per_token = _MAX_ADV_LOGPROBS_PER_TOKEN
 
         result.append(AgentGeneration(
             agent_id=gen.agent_id,
             output_text=text,
-            token_logprobs=[logprob] * (T * 5),
+            token_logprobs=logprobs_per_token * T,
             is_faulty=True,
             fault_type="F2_byzantine",
         ))
@@ -142,29 +151,28 @@ async def _run_pipeline_condition(
     agents: List[AgentGeneration],
     condition: str,
     tau: float,
-) -> Tuple[str, bool]:
+    ground_truth: str,
+) -> Tuple[str, bool, bool]:
     """Run one pipeline condition on a single question's agent pool.
 
-    Returns (final_answer, is_low_confidence).
-    majority_voting: no filter, plurality answer.
+    Returns (final_answer, is_liveness_fallback, is_nli_fallback).
+    majority_answer_vote: no filter, answer-extracted plurality.
     stage1_only / full_pipeline: Module 1 filter + liveness fallback.
     """
-    if condition == "majority_voting":
-        return majority_voting(agents), False
+    if condition == "majority_answer_vote":
+        return answer_majority_voting(agents, ground_truth), False, False
 
     admitted = await filter_agents(agents, tau)
-    if len(admitted) < 2 * _F + 1:
+    is_liveness = len(admitted) < 2 * _F + 1
+    if is_liveness:
         admitted = agents
-        is_low = True
-    else:
-        is_low = False
 
     if condition == "stage1_only":
         answer = await _aggregate_stage1_only(admitted)
+        return answer, is_liveness, False
     else:  # full_pipeline
-        answer = await aggregate(admitted)
-
-    return answer, is_low
+        answer, nli_low = await aggregate(admitted)
+        return answer, is_liveness, nli_low
 
 
 def _compute_centroid_shift(
@@ -210,11 +218,13 @@ async def run_experiment_3(
         questions = questions[:n_questions]
     print(f"  {len(questions)} questions loaded.")
 
-    tau = calibrate_tau(questions)
-    print(f"  Calibrated τ = {tau:.4f}")
+    dev_n = max(0, int(len(questions) * 0.1))
+    tau = calibrate_tau(questions[:dev_n] if dev_n > 0 else questions)
+    questions = questions[dev_n:] if dev_n < len(questions) else questions
+    print(f"  Calibrated τ = {tau:.4f} on {dev_n} dev questions, evaluating on {len(questions)}")
 
     acc: Dict[str, Dict[str, Dict[str, List]]] = {
-        coord: {cond: {"correct": [], "fallback": []} for cond in _PIPELINE_CONDITIONS}
+        coord: {cond: {"correct": [], "fallback": [], "nli_fallback": []} for cond in _PIPELINE_CONDITIONS}
         for coord in _COORDINATION_DEGREES
     }
     shifts: Dict[str, Dict[str, List[float]]] = {
@@ -240,10 +250,13 @@ async def run_experiment_3(
             shifts[coordination]["delta"].append(shift["delta"])
 
             for condition in _PIPELINE_CONDITIONS:
-                answer, is_low = await _run_pipeline_condition(agents, condition, tau)
+                answer, is_liveness, is_nli_low = await _run_pipeline_condition(
+                    agents, condition, tau, ground_truth
+                )
                 is_correct = _extract_answer(answer, ground_truth) == ground_truth.strip()
                 acc[coordination][condition]["correct"].append(is_correct)
-                acc[coordination][condition]["fallback"].append(is_low)
+                acc[coordination][condition]["fallback"].append(is_liveness)
+                acc[coordination][condition]["nli_fallback"].append(is_nli_low)
 
     if n_skipped:
         print(f"  Skipped {n_skipped} questions with fewer than {_N} agents.")
@@ -260,6 +273,7 @@ async def run_experiment_3(
                 "pipeline_condition": cond,
                 "accuracy": float(np.mean(d["correct"])) if d["correct"] else 0.0,
                 "fallback_frequency": float(np.mean(d["fallback"])) if d["fallback"] else 0.0,
+                "nli_fallback_frequency": float(np.mean(d["nli_fallback"])) if d["nli_fallback"] else 0.0,
                 "centroid_shift_mean": dist_mean_avg,
                 "centroid_shift_gm": dist_gm_avg,
                 "centroid_shift_delta": delta_avg,
@@ -267,7 +281,7 @@ async def run_experiment_3(
 
     df = pd.DataFrame(rows, columns=[
         "coordination", "pipeline_condition", "accuracy", "fallback_frequency",
-        "centroid_shift_mean", "centroid_shift_gm", "centroid_shift_delta",
+        "nli_fallback_frequency", "centroid_shift_mean", "centroid_shift_gm", "centroid_shift_delta",
     ])
 
     print("\nResults summary:")

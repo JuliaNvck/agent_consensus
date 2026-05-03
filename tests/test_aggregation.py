@@ -157,7 +157,9 @@ class TestBatchedEntailment:
 class TestAggregate:
     @pytest.mark.asyncio
     async def test_empty_list_returns_empty_string(self) -> None:
-        assert await aggregate([]) == ""
+        text, is_low = await aggregate([])
+        assert text == ""
+        assert is_low is False
 
     @pytest.mark.asyncio
     async def test_single_agent_bypasses_both_stages(
@@ -170,9 +172,10 @@ class TestAggregate:
         monkeypatch.setattr("pipeline.aggregation._batched_entailment", entail_mock)
 
         gen = _make_gen("a0", "only answer")
-        result = await aggregate([gen])
+        text, is_low = await aggregate([gen])
 
-        assert result == "only answer"
+        assert text == "only answer"
+        assert is_low is False
         embed_mock.assert_not_called()
         entail_mock.assert_not_called()
 
@@ -183,7 +186,7 @@ class TestAggregate:
         """3 agents: two near origin, one far outlier.
 
         Embeddings: agent_0→[0,0], agent_1→[0.1,0], agent_2→[10,0].
-        Geometric median of 3 collinear points = middle value = [0.1,0].
+        Geometric median of 3 collinear points ≈ [0.1,0].
         Nearest to [0.1,0] is agent_1 → result must be "text_b".
         """
         embeddings = np.array([[0.0, 0.0], [0.1, 0.0], [10.0, 0.0]])
@@ -193,14 +196,42 @@ class TestAggregate:
         )
 
         gens = [_make_gen("a0", "text_a"), _make_gen("a1", "text_b"), _make_gen("a2", "text_c")]
-        result = await aggregate(gens)
-        assert result == "text_b"
+        text, is_low = await aggregate(gens)
+        assert text == "text_b"
+        assert is_low is False
 
     @pytest.mark.asyncio
-    async def test_entailment_failure_still_returns_candidate(
+    async def test_nli_failure_nearest_selects_next_candidate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Bidirectional entailment failure must not suppress the answer."""
+        """Nearest candidate fails NLI → next candidate in distance order is selected.
+
+        Embeddings: agent_0→[0,0], agent_1→[0.1,0], agent_2→[10,0].
+        Median ≈ [0.1,0]; nearest=text_b (dist=0), reference=text_a (dist=0.1).
+        First call (text_b vs text_a) fails → second call (text_a vs text_a) passes.
+        """
+        embeddings = np.array([[0.0, 0.0], [0.1, 0.0], [10.0, 0.0]])
+        monkeypatch.setattr("pipeline.aggregation._embed", lambda _: embeddings)
+
+        calls: list = []
+
+        def _fail_then_pass(a: str, b: str) -> tuple[bool, bool]:
+            calls.append((a, b))
+            return (False, False) if len(calls) == 1 else (True, True)
+
+        monkeypatch.setattr("pipeline.aggregation._batched_entailment", _fail_then_pass)
+
+        gens = [_make_gen("a0", "text_a"), _make_gen("a1", "text_b"), _make_gen("a2", "text_c")]
+        text, is_low = await aggregate(gens)
+        assert text == "text_a"  # second nearest selected after nearest failed NLI
+        assert is_low is False
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_all_nli_fail_returns_nearest_with_low_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All candidates fail NLI → nearest returned with is_low_confidence=True."""
         embeddings = np.array([[0.0, 0.0], [0.1, 0.0], [10.0, 0.0]])
         monkeypatch.setattr("pipeline.aggregation._embed", lambda _: embeddings)
         monkeypatch.setattr(
@@ -208,8 +239,9 @@ class TestAggregate:
         )
 
         gens = [_make_gen("a0", "text_a"), _make_gen("a1", "text_b"), _make_gen("a2", "text_c")]
-        result = await aggregate(gens)
-        assert result == "text_b"
+        text, is_low = await aggregate(gens)
+        assert text == "text_b"  # nearest (dist=0) returned as fallback
+        assert is_low is True
 
     @pytest.mark.asyncio
     async def test_two_agents_entailment_uses_both_texts(
@@ -228,9 +260,10 @@ class TestAggregate:
         monkeypatch.setattr("pipeline.aggregation._batched_entailment", _capture)
 
         gens = [_make_gen("a0", "alpha"), _make_gen("a1", "beta")]
-        result = await aggregate(gens)
+        text, is_low = await aggregate(gens)
 
-        assert isinstance(result, str)
+        assert isinstance(text, str)
+        assert is_low is False
         assert len(captured) == 1
         # Both agent texts must appear in the entailment call
         seen_texts = set(captured[0])
@@ -238,7 +271,7 @@ class TestAggregate:
         assert "beta" in seen_texts
 
     @pytest.mark.asyncio
-    async def test_return_type_is_str(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_return_type_is_tuple_str_bool(self, monkeypatch: pytest.MonkeyPatch) -> None:
         embeddings = np.array([[0.0, 0.0], [1.0, 0.0]])
         monkeypatch.setattr("pipeline.aggregation._embed", lambda _: embeddings)
         monkeypatch.setattr(
@@ -246,4 +279,6 @@ class TestAggregate:
         )
         gens = [_make_gen("a0", "x"), _make_gen("a1", "y")]
         result = await aggregate(gens)
-        assert isinstance(result, str)
+        assert isinstance(result, tuple)
+        assert isinstance(result[0], str)
+        assert isinstance(result[1], bool)
