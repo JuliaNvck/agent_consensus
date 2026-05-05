@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -136,6 +137,7 @@ async def run_experiment_1(
     beta_values: List[float] = _BETA_VALUES,
     fault_types: List[str] = _FAULT_TYPES,
     dev_fraction: float = 0.1,
+    n_questions: Optional[int] = None,
 ) -> pd.DataFrame:
     """Ablation study over (N, beta, fault_type) × 4 pipeline conditions.
 
@@ -157,6 +159,8 @@ async def run_experiment_1(
         accuracy, admission_rate, fallback_frequency.
     """
     all_questions = load_cache(cache_filepath)
+    if n_questions is not None:
+        all_questions = all_questions[:n_questions]
     dev_n = max(0, int(len(all_questions) * dev_fraction))
     if tau is None:
         tau = calibrate_tau(all_questions[:dev_n] if dev_n > 0 else all_questions)
@@ -220,3 +224,32 @@ async def run_experiment_1(
         os.makedirs(out_dir, exist_ok=True)
     df.to_csv(output_filepath, index=False)
     return df
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Experiment 1: ablation grid.")
+    parser.add_argument("--cache", required=True, help="Path to generation cache JSON.")
+    parser.add_argument(
+        "--output", required=True, help="Destination CSV (e.g. results/experiment_1_llama_answer_vote.csv)."
+    )
+    parser.add_argument(
+        "--n-questions", type=int, default=None,
+        help="Limit to the first N questions (for quick smoke tests).",
+    )
+    parser.add_argument(
+        "--include-n1", action="store_true",
+        help="Add N=1 (single-agent) to the evaluation grid.",
+    )
+    args = parser.parse_args()
+
+    n_values: List[int] = ([1] if args.include_n1 else []) + list(_N_VALUES)
+    asyncio.run(
+        run_experiment_1(
+            cache_filepath=args.cache,
+            output_filepath=args.output,
+            n_values=n_values,
+            n_questions=args.n_questions,
+        )
+    )
