@@ -19,7 +19,7 @@ _CONDITION_LABELS = {
     "baseline": "Self-Consistency (Baseline)",
     "soft_weighting": "Soft-Weighted SC",
     "hard_only": "Hard Filter + Majority",
-    "full_system": "Full System (Ours)",
+    "full_system": "Full System (Proposed)",
 }
 _COLORS = {
     "baseline": "#d62728",
@@ -149,7 +149,7 @@ def plot_fault_type_breakdown(
 
         for offset, cond, color, label in [
             (-width / 2, "baseline", _COLORS["baseline"], "Self-Consistency (Majority Vote)"),
-            (width / 2, "full_system", _COLORS["full_system"], "Full System (Ours)"),
+            (width / 2, "full_system", _COLORS["full_system"], "Full System (Proposed)"),
         ]:
             y = []
             for ft in fault_types:
@@ -192,8 +192,8 @@ def plot_fault_type_breakdown(
 
 
 if __name__ == "__main__":
-    llama_csv = os.path.join(_RESULTS_DIR, "experiment_1_llama_answer_vote.csv")
-    qwen_csv = os.path.join(_RESULTS_DIR, "experiment_1_qwen_answer_vote.csv")
+    llama_csv = os.path.join(_RESULTS_DIR, "experiment_1_llama_shuffled.csv")
+    qwen_csv = os.path.join(_RESULTS_DIR, "experiment_1_qwen_shuffled.csv")
 
     # With single-agent reference line (supplementary / appendix)
     plot_accuracy_vs_beta(
