@@ -218,6 +218,8 @@ async def run_experiment_3(
         questions = questions[:n_questions]
     print(f"  {len(questions)} questions loaded.")
 
+    import random as _random
+    _random.Random(42).shuffle(questions)
     dev_n = max(0, int(len(questions) * 0.1))
     tau = calibrate_tau(questions[:dev_n] if dev_n > 0 else questions)
     questions = questions[dev_n:] if dev_n < len(questions) else questions

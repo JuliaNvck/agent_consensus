@@ -158,9 +158,15 @@ async def run_experiment_1(
         DataFrame with columns: condition, n_agents, beta, fault_type,
         accuracy, admission_rate, fallback_frequency.
     """
+    import random as _random
     all_questions = load_cache(cache_filepath)
     if n_questions is not None:
         all_questions = all_questions[:n_questions]
+    # Shuffle with the experiment seed so the dev slice is representative across
+    # question types (GSM8K and StrategyQA are ordered together in the cache;
+    # taking the first 10% without shuffling biases tau toward GSM8K confidence).
+    _rng = _random.Random(seed)
+    _rng.shuffle(all_questions)
     dev_n = max(0, int(len(all_questions) * dev_fraction))
     if tau is None:
         tau = calibrate_tau(all_questions[:dev_n] if dev_n > 0 else all_questions)
