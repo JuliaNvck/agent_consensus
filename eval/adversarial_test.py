@@ -220,7 +220,7 @@ async def run_experiment_3(
 
     import random as _random
     _random.Random(42).shuffle(questions)
-    dev_n = max(0, int(len(questions) * 0.1))
+    dev_n = max(0, int(len(questions) * 0.2))
     tau = calibrate_tau(questions[:dev_n] if dev_n > 0 else questions)
     questions = questions[dev_n:] if dev_n < len(questions) else questions
     print(f"  Calibrated τ = {tau:.4f} on {dev_n} dev questions, evaluating on {len(questions)}")

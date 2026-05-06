@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from models import AgentGeneration
-from pipeline.filter import filter_agents, _compute_topk_mass_trajectory
+from pipeline.filter import filter_agents, _compute_topk_mass_trajectory, _agent_stats
 from pipeline.aggregation import aggregate
 from faults.injector import inject_faults
 from eval.baselines import answer_majority_voting, majority_voting, soft_weighted_geometric_median
@@ -34,12 +34,14 @@ def _extract_answer(output_text: str, ground_truth: str) -> str:
 
 def calibrate_tau(
     questions: List[Tuple[str, List[AgentGeneration]]],
-    percentile: float = 10.0,
+    percentile: float = 5.0,
 ) -> float:
-    """Return the `percentile`-th percentile of mean TopKMass across all agents.
+    """Return the `percentile`-th percentile of stable-region mean TopKMass across all agents.
 
-    Implements the design doc §3.2 calibration rule: τ = 10th percentile of clean-agent
-    scores on a dev slice. Call this on the uninjected cache before running experiments.
+    Implements the design doc §3.2 calibration rule: τ = 5th percentile of clean-agent
+    scores on a dev slice. Uses the post-warmup stable region of each trajectory
+    (positions ≥ W=64) so the score is length-invariant across output lengths.
+    Call this on the uninjected cache before running experiments.
     Falls back to _DEFAULT_TAU if no agents have non-empty logprobs.
     """
     scores: List[float] = []
@@ -49,7 +51,8 @@ def calibrate_tau(
                 continue
             traj = _compute_topk_mass_trajectory(gen.token_logprobs)
             if len(traj) > 0:
-                scores.append(float(traj.mean()))
+                mean_score, _ = _agent_stats(traj)
+                scores.append(mean_score)
     if not scores:
         return _DEFAULT_TAU
     scores.sort()
@@ -136,7 +139,7 @@ async def run_experiment_1(
     n_values: List[int] = _N_VALUES,
     beta_values: List[float] = _BETA_VALUES,
     fault_types: List[str] = _FAULT_TYPES,
-    dev_fraction: float = 0.1,
+    dev_fraction: float = 0.2,
     n_questions: Optional[int] = None,
 ) -> pd.DataFrame:
     """Ablation study over (N, beta, fault_type) × 4 pipeline conditions.

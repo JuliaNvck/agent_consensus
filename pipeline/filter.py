@@ -47,9 +47,17 @@ def _compute_topk_mass_trajectory(
     return trajectory
 
 
-def _agent_stats(trajectory: np.ndarray) -> Tuple[float, float]:
-    """Return (mean, population variance) of a TopKMass trajectory."""
-    return float(trajectory.mean()), float(trajectory.var())
+def _agent_stats(
+    trajectory: np.ndarray, warmup: int = WINDOW_SIZE
+) -> Tuple[float, float]:
+    """Return (mean, variance) of the stable (post-warmup) TopKMass trajectory.
+
+    Skips the first `warmup` positions where the sliding window is partially
+    populated, making the score length-invariant across output lengths.
+    Falls back to the full trajectory if the output is shorter than warmup.
+    """
+    stable = trajectory[warmup:] if len(trajectory) > warmup else trajectory
+    return float(stable.mean()), float(stable.var())
 
 
 async def filter_agents(
