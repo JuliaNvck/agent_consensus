@@ -1,9 +1,20 @@
 # System Design Document: Multi-Agent LLM Consensus
 
 ## 1. System Overview
-A fault-tolerant, two-module Python 3.11 asynchronous pipeline that filters and aggregates multi-agent LLM outputs based on generation-process signals and semantic clustering.
+A robust aggregation pipeline for multi-agent LLM outputs. The system identifies and down-weights degraded outputs using generation-process signals (Module 1), then aggregates the remaining outputs using a robust semantic estimator (Module 2).
+
+**Framing note:** The current experimental setup uses N=7 samples from the same model (homogeneous pool). In that setting the problem is *robust self-consistency*: some runs are wrong by chance, some produce low-quality output (crashes, off-task drift, confidently wrong answers). The BFT fault-tolerance framing — f-fault tolerance, 2f+1 liveness threshold — is used as analytical scaffolding to reason about worst-case degradation, not as a claim of adversarial robustness. A genuine adversarial setting would require agents operated by different untrusted parties (see §1.1).
+
 - **Phase 1 (Generation/Offline):** Agents generate text via a local `vLLM` server. All outputs and per-token log-probabilities are generated once and cached to a local JSON file.
 - **Phase 2 (Evaluation/Pipeline):** The filtering and aggregation pipeline runs entirely on the cached JSON data. **Crucial:** No `vLLM` imports or GPU generation code are permitted in Phase 2 to ensure lightweight reproducibility.
+
+### 1.1 Future Direction: Multi-Provider Heterogeneous Setting
+The natural extension of this work is a pool of agents operated by **different providers running different models** (e.g., GPT-4o, Claude, Gemini, LLaMA, Qwen). In that setting:
+- The BFT framing becomes genuinely motivated: a provider has an incentive to return confident-looking wrong answers, making F2 (confident-wrong with high-logprob spoofing) a realistic threat rather than a synthetic stress test.
+- TopKMass remains comparable across models because it is a ratio (sum of top-5 probs), not an absolute logprob value, making it architecture-agnostic.
+- Module 2 (geometric median in embedding space) is already model-agnostic — all text passes through the same sentence transformer regardless of source model.
+- Key blocker: not all providers expose per-token logprobs (Claude does not; OpenAI does). Module 1 would need a fallback for logprob-unavailable providers.
+- See implementation notes in §10 for what would change.
 
 ## 2. Core Data Structures
 The pipeline relies on these explicit, statically typed data structures passing between modules:
@@ -166,7 +177,12 @@ The ablation grid defined in `run_experiment_1` covers:
 - **β ∈ {0%, 15%, 30%, 45%}** fault fraction
 - **Fault types:** F1 (crash), F2 (Byzantine), F3 (drifter), mix
 
-The central claim of the paper is that the full system's accuracy-vs-β curve degrades more gracefully than self-consistency (baseline). The delta between `full_system` and `baseline` at β=0.30 and β=0.45 is the primary result.
+**Honest framing of claims:**
+- **Primary claim:** The pipeline degrades more gracefully than naive self-consistency (majority vote) as LLM output quality deteriorates — crashes, low-confidence drift, and confident errors are identified and handled before aggregation.
+- **Secondary claim:** Geometric median in embedding space resists coordinated wrong-answer clusters better than arithmetic aggregation (Exp 3, centroid shift metric).
+- **Not claimed:** Adversarial robustness against a real external attacker. The injected F2 fault is a synthetic stress test, not a real-world threat model in the homogeneous (same-model) setting.
+
+The delta between `full_system` and `baseline` at β=0.30 and β=0.45 is the primary result.
 
 ### 7.5 Published Reference Points
 These numbers provide sanity checks for beta=0 (no-fault) accuracy before fault injection:
@@ -471,3 +487,52 @@ Positive delta confirms geometric median stays ~0.24–0.29 embedding units clos
 **5. The BFT guarantee is model-agnostic.** Centroid shift results are consistent across LLaMA and Qwen, confirming geometric median robustness is not model-specific.
 
 **Output figures:** `results/exp3_llama/experiment_3_adversarial.png`, `results/exp3_qwen/experiment_3_adversarial.png`
+
+---
+
+## 10. Future Direction: Multi-Provider Heterogeneous Setting
+
+This section describes what would need to change to move from the current homogeneous setup (N samples from one model) to a genuine multi-provider ensemble where different agents are operated by different organisations running different models.
+
+### 10.1 What Changes Conceptually
+
+In the homogeneous setting, agents disagree due to stochastic sampling variance. No agent has an incentive to deceive. The BFT framing is scaffolding.
+
+In the multi-provider setting, a provider that operates one or more agents may have an incentive to steer the consensus toward a specific answer (commercial bias, model fine-tuning, or active manipulation). The F2 fault — a confident-looking wrong answer — becomes a realistic threat, not a synthetic one. The two-layer defense then has genuine motivation:
+- **Module 1** filters low-confidence providers (those whose model is uncertain or off-task).
+- **Module 2** uses content semantics, which a provider cannot fake without actually knowing the correct answer.
+
+### 10.2 Implementation Changes Required
+
+**Cache format:** Add `model_id` and `provider` fields per agent generation.
+```json
+{"agent_id": "q0_a2", "model_id": "gpt-4o", "provider": "openai", "output_text": "...", "token_logprobs": [...]}
+```
+
+**Phase 1 (generation):** `scripts/generate_cache.py` currently uses a single vLLM server. It would need separate API clients per provider (OpenAI, Anthropic, Google, etc.) and a unified logprob normalization layer.
+
+**Logprob availability — the key blocker:**
+| Provider | Logprobs available? | Notes |
+|---|---|---|
+| OpenAI (GPT-4o) | Yes | `logprobs=True`, top-5 via `top_logprobs=5` |
+| Anthropic (Claude) | **No** | Claude does not expose per-token logprobs |
+| Google (Gemini) | Partial | `response_logprobs=True` in some versions |
+| Open-weight (vLLM) | Yes | Full top-K control |
+
+Module 1 requires logprobs. For providers that don't expose them, two options:
+1. **Skip Module 1** for that provider — admit unconditionally, rely on Module 2 alone.
+2. **Proxy signal** — use output length, response time, or model-reported confidence as a substitute (weaker signal).
+
+**TopKMass comparability:** TopKMass is a ratio (sum of top-5 probs / 1.0), not an absolute logprob. It is comparable across models with different vocabulary sizes because it measures the model's own confidence relative to its own distribution. τ calibration (5th percentile of dev-slice scores) handles any remaining scale differences per-provider.
+
+**Module 2 (geometric median in embedding space):** No changes needed. The sentence transformer operates on output text regardless of source model. This module is already model-agnostic.
+
+**Evaluation:** In a real deployment there is no ground truth available at aggregation time. Evaluation would shift to held-out benchmarks or human annotation rather than exact-match accuracy. The current harness (exact-match against cached ground truth) is appropriate only for research evaluation.
+
+### 10.3 What the System Would Prove in That Setting
+
+With heterogeneous providers, the two primary results from the current study would be directly applicable:
+1. **Confidence filtering (Module 1)** identifies providers whose model is uncertain or producing off-task output — real failure modes, not injected ones.
+2. **Geometric median in embedding space (Module 2)** resists a minority of providers coordinating on the same wrong answer — a realistic commercial-incentive scenario.
+
+The centroid shift result from Experiment 3 (geometric median stays 0.24–0.29 units closer to the honest cluster than arithmetic mean) translates directly: replace "injected Byzantine agents" with "biased providers."
