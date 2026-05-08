@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from scipy.optimize import minimize
@@ -32,6 +32,46 @@ def answer_majority_voting(
         return ""
     answers = [_extract_answer(g.output_text, ground_truth) for g in agents]
     return Counter(answers).most_common(1)[0][0]
+
+
+def _extract_answer_strict(output_text: str, ground_truth: str) -> Optional[str]:
+    """Strict extraction: return None when no valid answer format is found.
+
+    Unlike _extract_answer, this never falls back to returning the full output_text.
+    Returning None signals that the agent's output should be skipped in a vote —
+    preventing garbage keys (F2 wrong-text, F3 off-topic) from winning pluralities.
+    """
+    import re
+    gt = ground_truth.strip().lower()
+    if gt in {"yes", "no"}:
+        m = re.search(r"\b(yes|no)\b", output_text.lower())
+        return m.group(1) if m else None
+    numbers = re.findall(r"\$?[\d,]+", output_text)
+    if numbers:
+        return numbers[-1].replace("$", "").replace(",", "")
+    return None
+
+
+def answer_majority_voting_strict(
+    agents: List[AgentGeneration],
+    ground_truth: str,
+) -> str:
+    """Strict majority vote: skip agents whose output has no parseable answer.
+
+    F1 crash agents (empty output), F2 Byzantine agents (wrong-format text), and
+    F3 drifters (off-topic text) all return None from _extract_answer_strict and
+    are excluded from the vote. Only agents with a recognisable answer format count.
+
+    Falls back to answer_majority_voting if no agent produces a parseable answer
+    (e.g. all agents crashed — preserves liveness).
+    """
+    if not agents:
+        return ""
+    extracted = [_extract_answer_strict(g.output_text, ground_truth) for g in agents]
+    valid = [a for a in extracted if a is not None]
+    if not valid:
+        return answer_majority_voting(agents, ground_truth)
+    return Counter(valid).most_common(1)[0][0]
 
 
 def _weighted_geometric_median(

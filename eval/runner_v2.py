@@ -1,10 +1,13 @@
-"""Experiment 1 runner — System V2 (distance-weighted majority vote).
+"""Experiment 1 runner — final system (strict extraction + stage1_only).
 
-Identical to eval/runner.py except Module 2 uses pipeline_v2.aggregation.aggregate
-(distance-weighted majority vote) instead of the NLI-based selection from v1.
-
-All other logic — Module 1 filter, BFT liveness fallback, calibration, ablation
-grid — is unchanged so results are directly comparable to v1 CSVs.
+Two fixes vs earlier runners:
+  1. baseline and hard_only use answer_majority_voting_strict: faulty agents whose
+     output has no parseable answer (F1 crash, F2 wrong-format text, F3 off-topic)
+     return None and are excluded from the vote instead of injecting garbage keys
+     that previously won pluralities at high beta.
+  2. full_system uses geometric median nearest-centroid (stage1_only) instead of
+     the distance-weighted majority vote from pipeline_v2, which regressed under
+     adversarial conditions (fragmented correct votes vs concentrated wrong cluster).
 """
 from __future__ import annotations
 
@@ -19,9 +22,13 @@ import pandas as pd
 
 from models import AgentGeneration
 from pipeline.filter import filter_agents, _compute_topk_mass_trajectory, _agent_stats
-from pipeline_v2.aggregation import aggregate  # ← v2: weighted vote, no NLI
+from pipeline.aggregation import _embed, _geometric_median
 from faults.injector import inject_faults
-from eval.baselines import answer_majority_voting, majority_voting, soft_weighted_geometric_median
+from eval.baselines import (
+    answer_majority_voting_strict,
+    majority_voting,
+    soft_weighted_geometric_median,
+)
 
 
 def _extract_answer(output_text: str, ground_truth: str) -> str:
@@ -101,6 +108,19 @@ def load_cache(filepath: str) -> List[Tuple[str, List[AgentGeneration]]]:
     return result
 
 
+def _stage1_only(admitted: List[AgentGeneration]) -> str:
+    """Geometric median → nearest-centroid selection (stage1_only logic)."""
+    if not admitted:
+        return ""
+    if len(admitted) == 1:
+        return admitted[0].output_text
+    texts = [g.output_text for g in admitted]
+    embs = _embed(texts)
+    median = _geometric_median(embs)
+    dists = np.linalg.norm(embs - median, axis=1)
+    return texts[int(np.argmin(dists))]
+
+
 async def _run_condition(
     agents: List[AgentGeneration],
     condition: str,
@@ -113,12 +133,15 @@ async def _run_condition(
     Returns (final_answer, n_admitted, is_low_confidence).
     baseline / soft_weighting: no filter, always admit all agents.
     hard_only / full_system: Module 1 filter with liveness fallback (BFT threshold 2f+1).
-    full_system uses pipeline_v2 aggregate (distance-weighted majority vote).
+
+    baseline and hard_only use strict extraction: agents with no parseable answer
+    format are excluded from the vote (None vote), preventing garbage-key plurality.
+    full_system uses geometric median nearest-centroid (stage1_only).
     """
     n = len(agents)
 
     if condition == "baseline":
-        return answer_majority_voting(agents, ground_truth), n, False
+        return answer_majority_voting_strict(agents, ground_truth), n, False
 
     if condition == "soft_weighting":
         return soft_weighted_geometric_median(agents), n, False
@@ -131,10 +154,10 @@ async def _run_condition(
         is_low = False
 
     if condition == "hard_only":
-        answer = answer_majority_voting(admitted, ground_truth)
-    else:  # full_system — uses v2 weighted-vote aggregate
-        answer, vote_low = await aggregate(admitted)
-        is_low = is_low or vote_low
+        answer = answer_majority_voting_strict(admitted, ground_truth)
+    else:  # full_system — geometric median nearest-centroid
+        answer = _stage1_only(admitted)
+        is_low = is_low  # nearest-centroid always produces an answer
 
     return answer, len(admitted), is_low
 

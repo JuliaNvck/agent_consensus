@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from eval.baselines import answer_majority_voting, majority_voting
+from eval.baselines import answer_majority_voting_strict, majority_voting
 from eval.runner_v2 import _extract_answer, calibrate_tau, load_cache
 from faults.injector import _F2_TEXT, _F2_LOGPROBS_PER_TOKEN, _F3_TEXT
 from models import AgentGeneration
@@ -150,7 +150,7 @@ async def _run_pipeline_condition(
     full_pipeline uses v2 weighted-vote aggregate.
     """
     if condition == "majority_answer_vote":
-        return answer_majority_voting(agents, ground_truth), False, False
+        return answer_majority_voting_strict(agents, ground_truth), False, False
 
     admitted = await filter_agents(agents, tau)
     is_liveness = len(admitted) < 2 * _F + 1
