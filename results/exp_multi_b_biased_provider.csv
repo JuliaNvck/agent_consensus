@@ -1,0 +1,7 @@
+condition,bias_type,accuracy,fallback_freq
+no_phi3,natural,0.675,0.05
+majority_vote_all,natural,0.7,0.0
+geometric_median_all,natural,0.675,0.0375
+no_phi3,injected,0.675,0.05
+majority_vote_all,injected,0.7,0.0
+geometric_median_all,injected,0.675,0.05

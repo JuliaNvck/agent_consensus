@@ -1,0 +1,6 @@
+condition,accuracy,low_confidence_freq,n_admitted_mean
+single_llama,0.6875,0.025,6.2125
+single_mistral,0.5625,0.075,6.175
+single_phi3,0.6625,0.0125,6.2125
+single_qwen,0.6625,0.0875,6.5625
+multi_provider,0.675,0.0375,6.05

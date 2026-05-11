@@ -1,0 +1,7 @@
+biased_provider,condition,bias_type,accuracy,fallback_freq
+mistral,no_mistral,natural,0.7,0.075
+mistral,majority_vote_all,natural,0.7,0.0
+mistral,geometric_median_all,natural,0.675,0.0375
+mistral,no_mistral,injected,0.7,0.075
+mistral,majority_vote_all,injected,0.7125,0.0
+mistral,geometric_median_all,injected,0.65,0.075
