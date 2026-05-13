@@ -73,7 +73,7 @@ Computed as a causal sliding-window mean over token positions. The stable-region
 | F2 (Byzantine) | 1.00 (logprob spoof: sum=1.00) | **Passes** — Module 2 must handle |
 | Clean agent | [0.96, 1.00] typical | Passes unless rare outlier |
 
-### Module 2: Geometric Median Nearest-Centroid (`pipeline/aggregation.py`, `stage1_only`)
+### Module 2: Geometric Median Nearest-Centroid (`pipeline/stage1.py`, `stage1_only`)
 
 1. Embed admitted agents' output text using `sentence-transformers/all-mpnet-base-v2` (768-dim)
 2. Compute geometric median of embeddings: minimise `Σ‖xᵢ − y‖₂` via Weiszfeld/L-BFGS-B
@@ -81,7 +81,7 @@ Computed as a causal sliding-window mean over token positions. The stable-region
 
 **Why geometric median over arithmetic mean:** The geometric median is the minimizer of sum of distances (not sum of squared distances), giving it a breakdown point of 1/2 — a minority of outlier embeddings cannot drag it arbitrarily far. The centroid shift metric (§4.3) measures this empirically: under coordinated attack, the geometric median stays 0.24–0.29 embedding units closer to the honest cluster than the arithmetic mean.
 
-**NLI Stage 2 (deprecated):** A bidirectional NLI entailment check was implemented as a second verification stage but is consistently the worst condition in all experiments. Entailment misclassification and reference-agent failure modes outweigh any residual defense. Not used in reported results.
+**NLI Stage 2 (deprecated):** A bidirectional NLI entailment check remains in `pipeline/aggregation.py` for provenance, but it is not used in the reported `_v2.csv` Exp 3 rows. The final nearest-centroid path reuses `_embed` and `_geometric_median` helpers from that module through `pipeline/stage1.py`.
 
 ### Ablation Conditions
 
@@ -92,7 +92,7 @@ Computed as a causal sliding-window mean over token positions. The stable-region
 | `hard_only` | TopKMass filter + liveness | Strict majority vote | Best for invalid-format faults |
 | `full_system` / `stage1_only` | TopKMass filter + liveness | Geometric median nearest-centroid | Best for coordinated attacks |
 
-**Strict answer extraction** (`_extract_answer_strict`): agents with no parseable answer return `None` and are excluded from the vote. This is applied to `baseline` and `hard_only`. Without it, the old baseline collapsed 16.5pp at β=0.45 (garbage text winning plurality).
+**Strict answer extraction** (`eval/answer_extraction.py`): agents with no parseable answer return `None` and are excluded from the vote. This is applied to `baseline` and `hard_only`. Without it, the old baseline collapsed 16.5pp at β=0.45 (garbage text winning plurality).
 
 ### Fault Injection (`faults/injector.py`)
 
@@ -252,7 +252,7 @@ Fallback frequency (stage1_only): 2.5% LLaMA, 11.25% Qwen.
 
 1. **`stage1_only` wins under coordinated attack: LLaMA +7.5pp (70.0% vs 62.5%).** Under uncoordinated conditions, majority vote leads (72.5% vs 67.5%) because diverse wrong answers split the adversarial vote. Under coordinated attack, the 2 Byzantine agents unify on the same answer, dragging majority vote to 62.5%. Geometric median resists: the 5-agent honest cluster remains spatially dominant.
 
-2. **`full_pipeline` (NLI Stage 2) is the worst condition in every scenario.** LLaMA: 56.25–57.5% across all conditions; Qwen: 48.75%. NLI entailment misclassification and reference-agent failure modes are the culprit. Do not use.
+2. **`full_pipeline` (weighted-vote ablation) is the worst condition in every scenario.** LLaMA: 56.25-57.5% across all conditions; Qwen: 48.75%. The reported `_v2.csv` rows use `pipeline_v2.aggregation.aggregate()`, not NLI Stage 2. The failure mode is weighted-vote fragmentation under coordinated valid-format attacks. Do not use it as the final method.
 
 3. **Qwen Exp 3 is neutral.** stage1_only = majority_vote = 65.0% under coordinated attack. The 11.25% liveness fallback explains this: Module 1 over-filters Qwen clean agents and reverts to the full 7-agent pool, including the 2 Byzantine agents — at which point geometric median operates on the uncleaned pool and converges toward majority vote behavior. The centroid shift deltas (+0.282–0.290) remain strong, confirming the mechanism works; the accuracy parity is a calibration artifact.
 
@@ -348,7 +348,7 @@ Two-panel grouped bar chart at β=45%. X-axis: F1 (Crash), F2 (Byzantine), F3 (D
 **Figure 3: `figures/adversarial_coordination.png`**
 Two-panel line chart. X-axis: coordination degree (Uncoordinated, Coordinated, Max Adversarial). Y-axis: accuracy 40%–85%. Three series per panel: Majority Vote (red dashed), Stage1-Only (green solid), Full Pipeline (purple dotted). Exact percentages annotated above each point.
 
-*Draft caption:* "Accuracy under adversarial coordination (Experiment 3). Under uncoordinated attack, majority vote leads because diverse wrong answers split the adversarial vote. Under coordinated attack, majority vote drops 10pp (LLaMA: 72.5%→62.5%) while Stage1-Only recovers to 70.0%, demonstrating that geometric median's advantage is tied to adversarial cluster cohesion. Full Pipeline (NLI Stage 2) is consistently the worst condition and is not recommended."
+*Draft caption:* "Accuracy under adversarial coordination (Experiment 3). Under uncoordinated attack, majority vote leads because diverse wrong answers split the adversarial vote. Under coordinated attack, majority vote drops 10pp (LLaMA: 72.5%→62.5%) while Stage1-Only recovers to 70.0%, demonstrating that geometric median's advantage is tied to adversarial cluster cohesion. Full Pipeline is the `pipeline_v2` weighted-vote ablation in the reported `_v2.csv` files and is not recommended."
 
 **Figure 4: `results/exp2_llama/experiment_2_signals.png`** (or append to paper body)
 Three-panel figure for LLaMA signal quality. Panel A: ROC curves for TopKMass, −Entropy, −LogprobVar with AUC in legend. Panel B: TopKMass scatter (x=score, y=jittered correctness label) with per-class median lines. Panel C: Precision-Recall curves with AP in legend.
@@ -377,8 +377,8 @@ stage1_only = majority_vote = 65.0% under coordinated attack for Qwen. Caused by
 Exp A: multi-provider doesn't beat the best single provider (−1.25pp vs LLaMA).
 Exp B: geometric median loses to majority vote under natural provider bias. The distinction is clear: the technique requires coordinated wrong answers, which natural provider bias does not produce. Report in the paper as scope delimitation, not a failure.
 
-**4. NLI Stage 2 consistently worst.**
-full_pipeline (NLI entailment verification) is 10–14pp below stage1_only in every experiment. It is included for completeness. The paper should explicitly state that Stage 2 is not recommended and explain why (entailment misclassification, reference-agent failure modes).
+**4. Weighted-vote full_pipeline is consistently worst in reported Exp 3.**
+The reported `full_pipeline` rows use `pipeline_v2` distance-weighted answer voting and are 10-14pp below stage1_only for LLaMA, with Qwen at 48.75%. The paper should explicitly state that these `_v2.csv` rows are not NLI results. NLI remains a deprecated earlier implementation in `pipeline/aggregation.py`.
 
 **5. N=7 limits fault tolerance at β=0.45.**
 floor(7×0.45)=3 faults, but f=2 in BFT terms — so β=0.45 is super-threshold. Liveness fallback fires at 100% for F1/F3 at β=0.45 N=7, making hard_only and full_system equivalent to baseline in those cells. This means the Exp 1 result understates the advantage of Module 1 filtering at lower β values.
@@ -453,9 +453,12 @@ All experiments are reproducible from the committed codebase. No GPU needed for 
 |---|---|
 | Phase 1 generation | `scripts/generate_cache.py` |
 | Module 1 filter | `pipeline/filter.py` |
-| Module 2 aggregation | `pipeline/aggregation.py` |
+| Module 2 stage1-only aggregation | `pipeline/stage1.py` |
+| Embedding and geometric-median helpers | `pipeline/aggregation.py` |
+| Answer extraction helpers | `eval/answer_extraction.py` |
+| Homogeneous cache loading | `eval/io.py` |
 | Fault injection | `faults/injector.py` |
-| Exp 1 runner | `eval/runner.py` → `run_experiment_1()` |
+| Exp 1 runner | `eval/runner_v2.py` -> `run_experiment_1()` |
 | Exp 2 signal quality | `eval/signal_quality.py` |
 | Exp 3 adversarial | `eval/adversarial_test_v2.py` |
 | Exp A multi-provider | `eval/runner_multi.py` |

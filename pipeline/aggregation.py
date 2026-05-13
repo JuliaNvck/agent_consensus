@@ -1,3 +1,10 @@
+"""Older NLI aggregate path plus reusable embedding/geometric-median helpers.
+
+The reported v2 Experiment 1/3 stage1_only path reuses `_embed` and
+`_geometric_median` through `pipeline.stage1`. The async `aggregate` function in
+this module is the earlier nearest-candidate plus NLI-verification implementation.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -26,6 +33,7 @@ def _get_embed_model() -> SentenceTransformer:
     global _embed_model
     if _embed_model is None:
         from sentence_transformers import SentenceTransformer as _ST
+
         _embed_model = _ST(_EMBED_MODEL_NAME)
     return _embed_model
 
@@ -33,10 +41,9 @@ def _get_embed_model() -> SentenceTransformer:
 def _get_nli_model() -> Tuple[AutoTokenizer, AutoModelForSequenceClassification]:
     global _nli_tokenizer, _nli_model
     if _nli_model is None:
-        from transformers import (
-            AutoModelForSequenceClassification as _Model,
-            AutoTokenizer as _Tok,
-        )
+        from transformers import AutoModelForSequenceClassification as _Model
+        from transformers import AutoTokenizer as _Tok
+
         _nli_tokenizer = _Tok.from_pretrained(_NLI_MODEL_NAME)
         _nli_model = _Model.from_pretrained(_NLI_MODEL_NAME)
         _nli_model.eval()
@@ -53,14 +60,15 @@ def _geometric_median(embeddings: np.ndarray) -> np.ndarray:
     Uses an analytic gradient with a small epsilon floor on distances to handle
     degenerate cases (duplicate embeddings) without division by zero.
     """
+
     def _obj(y: np.ndarray) -> float:
         return float(np.sum(np.linalg.norm(embeddings - y, axis=1)))
 
     def _grad(y: np.ndarray) -> np.ndarray:
-        diffs = embeddings - y                                    # (N, D)
-        dists = np.linalg.norm(diffs, axis=1, keepdims=True)     # (N, 1)
+        diffs = embeddings - y  # (N, D)
+        dists = np.linalg.norm(diffs, axis=1, keepdims=True)  # (N, 1)
         dists = np.maximum(dists, 1e-10)
-        return -np.sum(diffs / dists, axis=0)                     # (D,)
+        return -np.sum(diffs / dists, axis=0)  # (D,)
 
     x0 = embeddings.mean(axis=0)
     result = minimize(_obj, x0, jac=_grad, method="L-BFGS-B")
@@ -119,11 +127,11 @@ async def aggregate(admitted: List[AgentGeneration]) -> Tuple[str, bool]:
     texts = [gen.output_text for gen in admitted]
 
     # Stage 1: geometric median → candidates ranked by distance
-    embeddings = _embed(texts)                                     # (N, D)
-    median = _geometric_median(embeddings)                         # (D,)
-    dists = np.linalg.norm(embeddings - median, axis=1)           # (N,)
+    embeddings = _embed(texts)  # (N, D)
+    median = _geometric_median(embeddings)  # (D,)
+    dists = np.linalg.norm(embeddings - median, axis=1)  # (N,)
     sorted_idx = np.argsort(dists)
-    reference = texts[int(sorted_idx[1])]                         # second-nearest, fixed
+    reference = texts[int(sorted_idx[1])]  # second-nearest, fixed
 
     # Stage 2: find first candidate with bidirectional entailment against reference
     for rank_idx in sorted_idx:

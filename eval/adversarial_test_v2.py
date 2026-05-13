@@ -28,24 +28,34 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from eval.baselines import answer_majority_voting_strict, majority_voting
-from eval.runner_v2 import _extract_answer, calibrate_tau, load_cache
-from faults.injector import _F2_TEXT, _F2_LOGPROBS_PER_TOKEN, _F3_TEXT
+from eval.answer_extraction import answer_majority_voting_strict
+from eval.answer_extraction import extract_answer as _extract_answer
+from eval.io import load_cache
+from eval.runner_v2 import calibrate_tau
+from faults.injector import _F2_LOGPROBS_PER_TOKEN, _F2_TEXT, _F3_TEXT
 from models import AgentGeneration
-from pipeline_v2.aggregation import _embed, _geometric_median, aggregate  # ← v2
+from pipeline import aggregation as _aggregation
 from pipeline.filter import filter_agents
+from pipeline.stage1 import nearest_centroid_text
+from pipeline_v2.aggregation import aggregate
 
 _N: int = 7
 _F: int = 2
 _DEFAULT_TOKEN_COUNT: int = 20
 
 _COORD_LOGPROBS_PER_TOKEN: List[float] = [
-    math.log(0.95), math.log(0.02), math.log(0.015),
-    math.log(0.010), math.log(0.005),
+    math.log(0.95),
+    math.log(0.02),
+    math.log(0.015),
+    math.log(0.010),
+    math.log(0.005),
 ]
 _MAX_ADV_LOGPROBS_PER_TOKEN: List[float] = [
-    math.log(0.95), math.log(0.02), math.log(0.015),
-    math.log(0.010), math.log(0.005),
+    math.log(0.95),
+    math.log(0.02),
+    math.log(0.015),
+    math.log(0.010),
+    math.log(0.005),
 ]
 
 _COORDINATION_DEGREES = ["uncoordinated", "coordinated", "maximally_adversarial"]
@@ -111,13 +121,15 @@ def _build_adversarial_pool(
             text = wrong_text
             logprobs_per_token = _MAX_ADV_LOGPROBS_PER_TOKEN
 
-        result.append(AgentGeneration(
-            agent_id=gen.agent_id,
-            output_text=text,
-            token_logprobs=logprobs_per_token * T,
-            is_faulty=True,
-            fault_type="F2_byzantine",
-        ))
+        result.append(
+            AgentGeneration(
+                agent_id=gen.agent_id,
+                output_text=text,
+                token_logprobs=logprobs_per_token * T,
+                is_faulty=True,
+                fault_type="F2_byzantine",
+            )
+        )
         faulty_mask.append(True)
 
     return result, faulty_mask
@@ -125,15 +137,7 @@ def _build_adversarial_pool(
 
 async def _aggregate_stage1_only(admitted: List[AgentGeneration]) -> str:
     """Nearest-centroid selection: geometric median → return closest output text."""
-    if not admitted:
-        return ""
-    if len(admitted) == 1:
-        return admitted[0].output_text
-    texts = [g.output_text for g in admitted]
-    embs = _embed(texts)
-    median = _geometric_median(embs)
-    dists = np.linalg.norm(embs - median, axis=1)
-    return texts[int(np.argmin(dists))]
+    return nearest_centroid_text(admitted)
 
 
 async def _run_pipeline_condition(
@@ -171,7 +175,7 @@ def _compute_centroid_shift(
 ) -> Dict[str, float]:
     """Measure how far arithmetic mean and geometric median drift from the clean cluster."""
     texts = [g.output_text for g in agents]
-    embs = _embed(texts)
+    embs = _aggregation._embed(texts)
 
     clean_idx = [i for i, f in enumerate(faulty_mask) if not f]
     if not clean_idx:
@@ -179,7 +183,7 @@ def _compute_centroid_shift(
 
     clean_centroid = embs[clean_idx].mean(axis=0)
     mean_centroid = embs.mean(axis=0)
-    gm_centroid = _geometric_median(embs)
+    gm_centroid = _aggregation._geometric_median(embs)
 
     dist_mean = float(np.linalg.norm(mean_centroid - clean_centroid))
     dist_gm = float(np.linalg.norm(gm_centroid - clean_centroid))
@@ -204,14 +208,20 @@ async def run_experiment_3(
     print(f"  {len(questions)} questions loaded.")
 
     import random as _random
+
     _random.Random(42).shuffle(questions)
     dev_n = max(0, int(len(questions) * 0.2))
     tau = calibrate_tau(questions[:dev_n] if dev_n > 0 else questions)
     questions = questions[dev_n:] if dev_n < len(questions) else questions
-    print(f"  Calibrated τ = {tau:.4f} on {dev_n} dev questions, evaluating on {len(questions)}")
+    print(
+        f"  Calibrated τ = {tau:.4f} on {dev_n} dev questions, evaluating on {len(questions)}"
+    )
 
     acc: Dict[str, Dict[str, Dict[str, List]]] = {
-        coord: {cond: {"correct": [], "fallback": [], "low_confidence": []} for cond in _PIPELINE_CONDITIONS}
+        coord: {
+            cond: {"correct": [], "fallback": [], "low_confidence": []}
+            for cond in _PIPELINE_CONDITIONS
+        }
         for coord in _COORDINATION_DEGREES
     }
     shifts: Dict[str, Dict[str, List[float]]] = {
@@ -229,7 +239,9 @@ async def run_experiment_3(
             print(f"  Question {q_idx + 1}/{len(questions)}...")
 
         for coordination in _COORDINATION_DEGREES:
-            agents, faulty_mask = _build_adversarial_pool(clean_gens, ground_truth, coordination)
+            agents, faulty_mask = _build_adversarial_pool(
+                clean_gens, ground_truth, coordination
+            )
 
             shift = _compute_centroid_shift(agents, faulty_mask)
             shifts[coordination]["dist_mean"].append(shift["dist_mean"])
@@ -240,7 +252,9 @@ async def run_experiment_3(
                 answer, is_liveness, is_low = await _run_pipeline_condition(
                     agents, condition, tau, ground_truth
                 )
-                is_correct = _extract_answer(answer, ground_truth) == ground_truth.strip()
+                is_correct = (
+                    _extract_answer(answer, ground_truth) == ground_truth.strip()
+                )
                 acc[coordination][condition]["correct"].append(is_correct)
                 acc[coordination][condition]["fallback"].append(is_liveness)
                 acc[coordination][condition]["low_confidence"].append(is_low)
@@ -250,26 +264,53 @@ async def run_experiment_3(
 
     rows = []
     for coord in _COORDINATION_DEGREES:
-        dist_mean_avg = float(np.mean(shifts[coord]["dist_mean"])) if shifts[coord]["dist_mean"] else 0.0
-        dist_gm_avg = float(np.mean(shifts[coord]["dist_gm"])) if shifts[coord]["dist_gm"] else 0.0
-        delta_avg = float(np.mean(shifts[coord]["delta"])) if shifts[coord]["delta"] else 0.0
+        dist_mean_avg = (
+            float(np.mean(shifts[coord]["dist_mean"]))
+            if shifts[coord]["dist_mean"]
+            else 0.0
+        )
+        dist_gm_avg = (
+            float(np.mean(shifts[coord]["dist_gm"]))
+            if shifts[coord]["dist_gm"]
+            else 0.0
+        )
+        delta_avg = (
+            float(np.mean(shifts[coord]["delta"])) if shifts[coord]["delta"] else 0.0
+        )
         for cond in _PIPELINE_CONDITIONS:
             d = acc[coord][cond]
-            rows.append({
-                "coordination": coord,
-                "pipeline_condition": cond,
-                "accuracy": float(np.mean(d["correct"])) if d["correct"] else 0.0,
-                "fallback_frequency": float(np.mean(d["fallback"])) if d["fallback"] else 0.0,
-                "low_confidence_frequency": float(np.mean(d["low_confidence"])) if d["low_confidence"] else 0.0,
-                "centroid_shift_mean": dist_mean_avg,
-                "centroid_shift_gm": dist_gm_avg,
-                "centroid_shift_delta": delta_avg,
-            })
+            rows.append(
+                {
+                    "coordination": coord,
+                    "pipeline_condition": cond,
+                    "accuracy": float(np.mean(d["correct"])) if d["correct"] else 0.0,
+                    "fallback_frequency": (
+                        float(np.mean(d["fallback"])) if d["fallback"] else 0.0
+                    ),
+                    "low_confidence_frequency": (
+                        float(np.mean(d["low_confidence"]))
+                        if d["low_confidence"]
+                        else 0.0
+                    ),
+                    "centroid_shift_mean": dist_mean_avg,
+                    "centroid_shift_gm": dist_gm_avg,
+                    "centroid_shift_delta": delta_avg,
+                }
+            )
 
-    df = pd.DataFrame(rows, columns=[
-        "coordination", "pipeline_condition", "accuracy", "fallback_frequency",
-        "low_confidence_frequency", "centroid_shift_mean", "centroid_shift_gm", "centroid_shift_delta",
-    ])
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "coordination",
+            "pipeline_condition",
+            "accuracy",
+            "fallback_frequency",
+            "low_confidence_frequency",
+            "centroid_shift_mean",
+            "centroid_shift_gm",
+            "centroid_shift_delta",
+        ],
+    )
 
     print("\nResults summary:")
     for _, row in df.iterrows():
@@ -308,7 +349,9 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
             for coord in _COORDINATION_DEGREES
         ]
         bars = ax.bar(
-            x + offset, y, bar_w * 0.9,
+            x + offset,
+            y,
+            bar_w * 0.9,
             label=_COND_LABELS[cond],
             color=_COND_COLORS[cond],
             alpha=0.85,
@@ -318,11 +361,16 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.01,
                 f"{val:.0%}",
-                ha="center", va="bottom", fontsize=7.5,
-                color=_COND_COLORS[cond], fontweight="bold",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                color=_COND_COLORS[cond],
+                fontweight="bold",
             )
 
-    ax.set_title("Accuracy vs. Coordination Degree (System V2)", fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Accuracy vs. Coordination Degree (System V2)", fontsize=13, fontweight="bold"
+    )
     ax.set_xlabel("Byzantine Coordination Level", fontsize=11)
     ax.set_ylabel("Accuracy", fontsize=11)
     ax.set_xticks(x)
@@ -339,10 +387,12 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
     shift_rows = df.drop_duplicates("coordination").set_index("coordination")
     width = 0.3
 
-    for j, (col, label, color) in enumerate([
-        ("centroid_shift_mean", "Arithmetic Mean", "#aec7e8"),
-        ("centroid_shift_gm", "Geometric Median", "#2ca02c"),
-    ]):
+    for j, (col, label, color) in enumerate(
+        [
+            ("centroid_shift_mean", "Arithmetic Mean", "#aec7e8"),
+            ("centroid_shift_gm", "Geometric Median", "#2ca02c"),
+        ]
+    ):
         offset = (j - 0.5) * width
         y = [shift_rows.loc[coord, col] for coord in _COORDINATION_DEGREES]
         bars = ax.bar(x + offset, y, width * 0.9, label=label, color=color, alpha=0.85)
@@ -351,7 +401,10 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.002,
                 f"{val:.3f}",
-                ha="center", va="bottom", fontsize=7.5, color="black",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                color="black",
             )
 
     for i, coord in enumerate(_COORDINATION_DEGREES):
@@ -361,13 +414,19 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
             shift_rows.loc[coord, "centroid_shift_gm"],
         )
         ax.text(
-            x[i], max_h + 0.012,
+            x[i],
+            max_h + 0.012,
             f"Δ={delta:.3f}",
-            ha="center", va="bottom", fontsize=8.5,
-            color="#2ca02c", fontweight="bold",
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            color="#2ca02c",
+            fontweight="bold",
         )
 
-    ax.set_title("Centroid Shift: Mean vs. Geometric Median", fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Centroid Shift: Mean vs. Geometric Median", fontsize=13, fontweight="bold"
+    )
     ax.set_xlabel("Byzantine Coordination Level", fontsize=11)
     ax.set_ylabel("Distance to Clean Centroid  (↓ = more robust)", fontsize=10)
     ax.set_xticks(x)
@@ -379,7 +438,8 @@ def plot_experiment_3(df: pd.DataFrame, output_path: str) -> None:
 
     fig.suptitle(
         f"Experiment 3 V2: Adversarial Coordination Stress Test  (N={_N}, f={_F}, β≈28.6%)",
-        fontsize=14, y=1.01,
+        fontsize=14,
+        y=1.01,
     )
     plt.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)

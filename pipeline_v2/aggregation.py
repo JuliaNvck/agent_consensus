@@ -1,7 +1,9 @@
+"""Legacy distance-weighted vote ablation used by Exp 3 `full_pipeline` rows."""
+
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.optimize import minimize
@@ -10,13 +12,14 @@ from models import AgentGeneration
 
 _EMBED_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
-_embed_model: Optional[object] = None
+_embed_model: Optional[Any] = None
 
 
-def _get_embed_model() -> object:
+def _get_embed_model() -> Any:
     global _embed_model
     if _embed_model is None:
         from sentence_transformers import SentenceTransformer as _ST
+
         _embed_model = _ST(_EMBED_MODEL_NAME)
     return _embed_model
 
@@ -31,14 +34,15 @@ def _geometric_median(embeddings: np.ndarray) -> np.ndarray:
     Uses an analytic gradient with a small epsilon floor on distances to handle
     degenerate cases (duplicate embeddings) without division by zero.
     """
+
     def _obj(y: np.ndarray) -> float:
         return float(np.sum(np.linalg.norm(embeddings - y, axis=1)))
 
     def _grad(y: np.ndarray) -> np.ndarray:
-        diffs = embeddings - y                                    # (N, D)
-        dists = np.linalg.norm(diffs, axis=1, keepdims=True)     # (N, 1)
+        diffs = embeddings - y  # (N, D)
+        dists = np.linalg.norm(diffs, axis=1, keepdims=True)  # (N, 1)
         dists = np.maximum(dists, 1e-10)
-        return -np.sum(diffs / dists, axis=0)                     # (D,)
+        return -np.sum(diffs / dists, axis=0)  # (D,)
 
     x0 = embeddings.mean(axis=0)
     result = minimize(_obj, x0, jac=_grad, method="L-BFGS-B")
@@ -55,9 +59,7 @@ def _infer_is_numeric(texts: List[str]) -> bool:
     """
     if not texts:
         return False
-    numeric_count = sum(
-        1 for t in texts if len(re.findall(r"\$?[\d,]+", t)) >= 3
-    )
+    numeric_count = sum(1 for t in texts if len(re.findall(r"\$?[\d,]+", t)) >= 3)
     return numeric_count > len(texts) * 0.5
 
 
@@ -110,14 +112,14 @@ async def aggregate(admitted: List[AgentGeneration]) -> Tuple[str, bool]:
     texts = [gen.output_text for gen in admitted]
 
     # Stage 1: embed → geometric median → proximity weights
-    embeddings = _embed(texts)                                    # (N, D)
-    median = _geometric_median(embeddings)                        # (D,)
-    dists = np.linalg.norm(embeddings - median, axis=1)          # (N,)
+    embeddings = _embed(texts)  # (N, D)
+    median = _geometric_median(embeddings)  # (D,)
+    dists = np.linalg.norm(embeddings - median, axis=1)  # (N,)
 
     mean_d = float(np.mean(dists))
     if mean_d < 1e-10:
         mean_d = 1.0  # degenerate case: all embeddings identical
-    weights = np.exp(-dists / mean_d)                            # w_i ∈ (0, 1]
+    weights = np.exp(-dists / mean_d)  # w_i ∈ (0, 1]
 
     # Stage 2: infer answer type, extract keys, accumulate weighted votes
     is_numeric = _infer_is_numeric(texts)

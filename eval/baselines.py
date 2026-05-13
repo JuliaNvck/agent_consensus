@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 from scipy.optimize import minimize
 
+from eval.answer_extraction import answer_majority_voting, answer_majority_voting_strict
+from eval.answer_extraction import extract_answer_strict as _extract_answer_strict
 from models import AgentGeneration
-from pipeline.filter import _compute_topk_mass_trajectory
 from pipeline import aggregation as _aggregation
+from pipeline.filter import _compute_topk_mass_trajectory
 
 
 def majority_voting(agents: List[AgentGeneration]) -> str:
@@ -16,62 +18,6 @@ def majority_voting(agents: List[AgentGeneration]) -> str:
     if not agents:
         return ""
     return Counter(g.output_text for g in agents).most_common(1)[0][0]
-
-
-def answer_majority_voting(
-    agents: List[AgentGeneration],
-    ground_truth: str,
-) -> str:
-    """Vote over extracted answers, not raw output_text.
-
-    Uses _extract_answer to normalize each output before counting, so agents
-    with different CoT phrasings but the same final answer are counted together.
-    """
-    from eval.runner import _extract_answer
-    if not agents:
-        return ""
-    answers = [_extract_answer(g.output_text, ground_truth) for g in agents]
-    return Counter(answers).most_common(1)[0][0]
-
-
-def _extract_answer_strict(output_text: str, ground_truth: str) -> Optional[str]:
-    """Strict extraction: return None when no valid answer format is found.
-
-    Unlike _extract_answer, this never falls back to returning the full output_text.
-    Returning None signals that the agent's output should be skipped in a vote —
-    preventing garbage keys (F2 wrong-text, F3 off-topic) from winning pluralities.
-    """
-    import re
-    gt = ground_truth.strip().lower()
-    if gt in {"yes", "no"}:
-        m = re.search(r"\b(yes|no)\b", output_text.lower())
-        return m.group(1) if m else None
-    numbers = re.findall(r"\$?[\d,]+", output_text)
-    if numbers:
-        return numbers[-1].replace("$", "").replace(",", "")
-    return None
-
-
-def answer_majority_voting_strict(
-    agents: List[AgentGeneration],
-    ground_truth: str,
-) -> str:
-    """Strict majority vote: skip agents whose output has no parseable answer.
-
-    F1 crash agents (empty output), F2 Byzantine agents (wrong-format text), and
-    F3 drifters (off-topic text) all return None from _extract_answer_strict and
-    are excluded from the vote. Only agents with a recognisable answer format count.
-
-    Falls back to answer_majority_voting if no agent produces a parseable answer
-    (e.g. all agents crashed — preserves liveness).
-    """
-    if not agents:
-        return ""
-    extracted = [_extract_answer_strict(g.output_text, ground_truth) for g in agents]
-    valid = [a for a in extracted if a is not None]
-    if not valid:
-        return answer_majority_voting(agents, ground_truth)
-    return Counter(valid).most_common(1)[0][0]
 
 
 def _weighted_geometric_median(
@@ -82,14 +28,15 @@ def _weighted_geometric_median(
     Minimises f(y) = Σ w_i · ‖x_i − y‖₂ with analytic gradient.
     Distance denominators clamped to 1e-10 to handle duplicate embeddings.
     """
+
     def _obj(y: np.ndarray) -> float:
         return float(np.sum(weights * np.linalg.norm(embeddings - y, axis=1)))
 
     def _grad(y: np.ndarray) -> np.ndarray:
-        diffs = embeddings - y                                      # (N, D)
-        dists = np.linalg.norm(diffs, axis=1, keepdims=True)       # (N, 1)
+        diffs = embeddings - y  # (N, D)
+        dists = np.linalg.norm(diffs, axis=1, keepdims=True)  # (N, 1)
         dists = np.maximum(dists, 1e-10)
-        return -np.sum(weights[:, None] * diffs / dists, axis=0)   # (D,)
+        return -np.sum(weights[:, None] * diffs / dists, axis=0)  # (D,)
 
     x0 = np.average(embeddings, axis=0, weights=weights)
     result = minimize(_obj, x0, jac=_grad, method="L-BFGS-B")
@@ -123,7 +70,7 @@ def soft_weighted_geometric_median(agents: List[AgentGeneration]) -> str:
 
     texts = [gen.output_text for gen in agents]
     # Use module-attribute lookup so conftest monkeypatch on pipeline.aggregation._embed applies
-    embeddings = _aggregation._embed(texts)                         # (N, D)
-    median = _weighted_geometric_median(embeddings, weights)        # (D,)
-    dists = np.linalg.norm(embeddings - median, axis=1)            # (N,)
+    embeddings = _aggregation._embed(texts)  # (N, D)
+    median = _weighted_geometric_median(embeddings, weights)  # (D,)
+    dists = np.linalg.norm(embeddings - median, axis=1)  # (N,)
     return texts[int(np.argmin(dists))]
