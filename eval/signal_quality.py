@@ -3,11 +3,11 @@
 
 Computes three per-agent generation signals (TopKMass, Token Entropy, Logprob Variance),
 labels each generation as correct/incorrect against ground truth, then produces ROC/AUC
-and Precision-Recall curves to validate that TopKMass is the best correctness predictor.
+and Precision-Recall curves to compare TopKMass with simpler correctness predictors.
 
 Optionally injects F2/F3 faults to additionally measure fault detectability.
 
-CPU only — no vllm, no torch imports.
+CPU only; no vllm, no torch imports.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from eval.answer_extraction import extract_answer as _extract_answer
 from eval.io import load_cache
 from faults.injector import inject_faults
 from models import AgentGeneration
-from pipeline.filter import _compute_topk_mass_trajectory
+from pipeline.filter import _agent_stats, _compute_topk_mass_trajectory
 
 _SIGNALS = ["topk_mass", "neg_entropy", "neg_logprob_var"]
 _SIGNAL_LABELS = {
@@ -48,7 +48,7 @@ def _mean_token_entropy(token_logprobs: List[float]) -> float:
     """Approximate mean token entropy from top-5 logprobs per position.
 
     H_i = -sum(exp(lp) * lp) for the top-5 logprobs at position i.
-    Uses raw (unnormalized) top-5 probs — a standard approximation when the full
+    Uses raw (unnormalized) top-5 probs, a standard approximation when the full
     vocabulary distribution is unavailable.
     """
     arr = np.array(token_logprobs, dtype=np.float64).reshape(-1, 5)
@@ -72,9 +72,9 @@ def compute_signals(gen: AgentGeneration) -> Optional[Dict[str, float]]:
 
     Returns None if token_logprobs is empty (e.g. F1_crash agents).
     All returned signals are oriented so that higher = more confident = more likely correct:
-    - topk_mass:       higher is better (raw mean TopKMass)
-    - neg_entropy:     higher is better (negated entropy — low entropy = confident)
-    - neg_logprob_var: higher is better (negated variance — low variance = stable)
+    - topk_mass:       higher is better (stable-region mean TopKMass)
+    - neg_entropy:     higher is better (negated entropy; low entropy = confident)
+    - neg_logprob_var: higher is better (negated variance; low variance = stable)
     """
     if not gen.token_logprobs:
         return None
@@ -82,7 +82,7 @@ def compute_signals(gen: AgentGeneration) -> Optional[Dict[str, float]]:
     if len(traj) == 0:
         return None
     return {
-        "topk_mass": float(traj.mean()),
+        "topk_mass": float(_agent_stats(traj)[0]),
         "neg_entropy": -_mean_token_entropy(gen.token_logprobs),
         "neg_logprob_var": -_logprob_variance(gen.token_logprobs),
     }
@@ -255,7 +255,7 @@ def plot_signals(df: pd.DataFrame, output_path: str) -> None:
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.axhline(1, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.set_title("TopKMass vs. Correctness", fontsize=13, fontweight="bold")
-    ax.set_xlabel("TopKMass Score (mean)", fontsize=11)
+    ax.set_xlabel("TopKMass Score (stable-region mean)", fontsize=11)
     ax.set_ylabel("Correct (1) / Incorrect (0)", fontsize=11)
     ax.set_ylim(-0.25, 1.25)
     ax.set_yticks([0, 1])
@@ -350,8 +350,8 @@ def run_experiment_2(
     """Analyze a generation cache and produce signal quality outputs.
 
     Saves:
-        <output_dir>/experiment_2_signals.csv  — per-agent signal DataFrame
-        <output_dir>/experiment_2_signals.png  — figure (3 panels clean, 4 panels with faults)
+        <output_dir>/experiment_2_signals.csv  - per-agent signal DataFrame
+        <output_dir>/experiment_2_signals.png  - figure (3 panels clean, 4 panels with faults)
     Returns the DataFrame.
     """
     print(f"Analyzing {cache_path}...")
