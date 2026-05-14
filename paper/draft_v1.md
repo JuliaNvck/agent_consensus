@@ -125,7 +125,7 @@ f(y) = sum_{i=1}^{N} ||x_i - y||_2
 
 via L-BFGS-B with analytic gradient `grad f(y) = -sum (x_i - y) / ||x_i - y||_2` and denominator clamping at 1e-10. The final answer is the `output_text` of the agent with minimum Euclidean distance to this geometric median (nearest-centroid selection). The reported homogeneous experiments use this nearest-centroid selector for the primary pipeline condition, named `full_system` in Experiment 1 and `stage1_only` in Experiment 3. Implementation provenance is provided in Appendix A.4.
 
-Earlier aggregation variants included bidirectional NLI verification and distance-weighted answer voting. These are retained only as ablations and are not the recommended geometric-median condition.
+Earlier aggregation variants included bidirectional natural language inference (NLI) entailment verification and distance-weighted answer voting, in which each agent's extracted answer is weighted by its proximity to the embedding-space geometric median before plurality voting. These are retained only as ablations and are not the recommended geometric-median condition.
 
 ### 3.4 Ablation Conditions
 
@@ -234,7 +234,7 @@ Experiment 3 evaluates coordinated synthetic wrong-answer injection: a minority 
 - **Coordinated:** Both agents produce the same wrong answer derived from the ground truth ("The answer is {opposite}." for StrategyQA; "The answer is {gt+7}." for GSM8K). They cluster at a single point in embedding space.
 - **Maximally adversarial:** Identical to coordinated in answer content, with a higher-confidence logprob spoof. Because both coordinated settings achieve TopKMass=1.00, this condition is numerically equivalent to coordinated for Module 1 admission and is interpreted as a duplicate stress setting rather than a stronger attack.
 
-Three pipeline conditions are compared: strict answer majority vote, geometric median nearest-centroid, and a distance-weighted voting ablation. The distance-weighted rows are not NLI results.
+Three pipeline conditions are compared: strict answer majority vote, geometric median nearest-centroid, and a distance-weighted voting ablation (see Appendix A.4 for implementation provenance).
 
 ### 6.2 Centroid Shift Metric
 
@@ -262,7 +262,7 @@ Positive delta indicates the geometric median stays closer to the honest cluster
 | **Max adversarial** | **stage1_only** | **70.0%** | **65.0%** |
 | Max adversarial | full_pipeline | 56.25% | 48.75% |
 
-**Table 5.** Centroid shift metric (distance to honest cluster centroid; lower = more robust).
+**Table 5.** Centroid shift metric. `dist_mean` and `dist_gm`: distance from the arithmetic mean and geometric median to the honest cluster centroid (smaller = closer to honest outputs). `delta = dist_mean - dist_gm`: positive values indicate the geometric median remains closer to the honest cluster than the arithmetic mean.
 
 | Coordination | Model | dist_mean | dist_gm | delta (mean - gm) |
 |---|---|---|---|---|
@@ -277,9 +277,9 @@ Positive delta indicates the geometric median stays closer to the honest cluster
 
 **Finding 1: geometric median nearest-centroid improves LLaMA under coordinated injection.** Under uncoordinated conditions, majority vote outperforms geometric median nearest-centroid (72.5% vs. 67.5%) because the two diverse wrong-answer embeddings do not form a cluster. Under coordinated injection, the two injected agents unify on a single wrong answer, reducing majority vote accuracy to 62.5%. Geometric median nearest-centroid reaches 70.0%, a 7.5pp improvement over majority vote in this setting.
 
-**Finding 2: the weighted-vote ablation is not retained.** LLaMA weighted-vote accuracy ranges from 56.25% to 57.5% across coordination degrees, and Qwen weighted-vote accuracy is 48.75% across conditions. Its failure mode is vote fragmentation: diverse correct answers can split weighted vote mass, while a coordinated wrong-answer cluster concentrates weight on one extractable answer. Geometric median nearest-centroid is therefore the retained geometric-median condition for this experiment.
+**Finding 2: the weighted-vote ablation is not retained.** LLaMA weighted-vote accuracy ranges from 56.25% to 57.5% across coordination degrees, and Qwen weighted-vote accuracy is 48.75% across conditions. Its failure mode is vote fragmentation: diverse correct answers can split weighted vote mass, while a coordinated wrong-answer cluster concentrates weight on one extractable answer. Geometric median nearest-centroid (70.0% LLaMA, 65.0% Qwen under coordinated injection) is therefore the retained geometric-median condition for this experiment.
 
-**Finding 3: Qwen Experiment 3 is neutral.** Under coordinated injection, geometric median nearest-centroid and majority vote both achieve 65.0% accuracy for Qwen. The liveness fallback rate for geometric median nearest-centroid is 11.25% (vs. 2.5% for LLaMA): Qwen's lower TopKMass distribution causes Module 1 to over-filter clean agents, reverting to the full 7-agent pool on roughly 1 in 9 questions. The centroid shift deltas remain positive (+0.282 to +0.290), but this mechanistic signal is not sufficient to produce an accuracy gain for Qwen.
+**Finding 3: Qwen Experiment 3 is neutral.** Under coordinated injection, geometric median nearest-centroid and majority vote both achieve 65.0% accuracy for Qwen. The liveness fallback rate for geometric median nearest-centroid is 11.25% (vs. 2.5% for LLaMA): Qwen's lower TopKMass distribution causes Module 1 to over-filter clean agents, reverting to the full 7-agent pool on roughly 1 in 9 questions. The centroid shift deltas remain positive (+0.282 to +0.290), but this mechanistic signal is not sufficient to produce an accuracy gain for Qwen. Adaptive tau calibration tuned to Qwen's score distribution (Section 9, future direction 2) could reduce this fallback rate and potentially recover the accuracy gain seen for LLaMA.
 
 **Finding 4: Centroid shift supports the mechanism but does not imply accuracy gains.** Positive delta is observed in all 6 conditions. Coordination increases dist_mean slightly (0.339 to 0.353 for LLaMA, 0.347 to 0.366 for Qwen) while dist_gm increases less. This supports the embedding-space mechanism, but Qwen's neutral accuracy result shows that centroid shift alone is not sufficient for improved final-answer accuracy.
 
@@ -295,7 +295,7 @@ To test whether multi-provider pools improve over the strongest single provider 
 
 **Table 6.** Experiment A: Multi-provider diversity results.
 
-| Condition | Accuracy | Low-Confidence Freq. | Mean Agents Admitted |
+| Condition | Accuracy | Liveness Fallback Freq. | Mean Agents Admitted |
 |---|---|---|---|
 | single_llama | 0.6875 | 0.025 | 6.21 |
 | multi_provider | 0.6750 | 0.038 | 6.05 |
@@ -309,7 +309,7 @@ The multi-provider pool does not exceed the strongest single provider in this ev
 
 Experiment B tests whether geometric median can absorb a systematically biased provider. Two designated biased providers (phi3, mistral) are evaluated under natural bias (as-is generation) and injected bias (F1/F2 fault injection), compared to an oracle condition (biased provider removed entirely).
 
-**Table 7.** Experiment B: Biased provider results (phi3 and mistral as biased providers).
+**Table 7.** Experiment B: Biased provider results (phi3 and mistral as biased providers). `no_X` = biased provider removed (oracle); `majority_vote_all` and `geometric_median_all` = all providers included, with majority vote or geometric median aggregation respectively.
 
 | Biased Provider | Condition | Bias Type | Accuracy |
 |---|---|---|---|
@@ -348,14 +348,14 @@ The experimental results support a unified thesis: the two structural failure mo
 
 | Failure Mode | Highest observed condition | Mechanism |
 |---|---|---|
-| F1 crash / F3 drifter (invalid-format) | hard_only, with soft_weighting strongest in high-F3 cells | Module 1 drops low-confidence agents; liveness fallback matters when overloaded |
+| F1 crash / F3 drifter (invalid-format) | hard_only, with soft_weighting strongest at N=7, beta=0.45, F3-only | Module 1 drops low-confidence agents; liveness fallback matters when overloaded |
 | F2 Byzantine (spoofed logprob, scattered) | hard_only | Spoofed agents pass Module 1; strict extraction + majority vote handles scattered wrong answers |
 | Coordinated valid-format attack (Exp 3) | stage1_only | Strict extraction keeps adversarial votes; geometric median resists tight cluster |
 | Diverse provider bias (Exp A/B) | majority vote | No tight cluster; geometric median offers no observed advantage |
 
 Module 1 is effective when the broken agents fall far outside the clean TopKMass cluster (F1 score=0, F3 score~2.3 x 10^-4). It is deliberately ineffective against F2 Byzantine agents (TopKMass=1.00 by design), because real logprob spoofing is a realistic threat in deployed systems and a filter that is defeatable by logprob manipulation provides false assurance.
 
-Module 2 (geometric median) is most useful when wrong agents form a spatially coherent cluster in embedding space. Its robustness comes from the L1-type (sum of distances) objective, which has a theoretical breakdown point of 1/2, compared to the L2-type (sum of squared distances) objective of the arithmetic mean. The centroid shift results (+0.240 to +0.290 embedding units, positive across all conditions and both models) support this mechanism, but they are not sufficient for accuracy gains.
+Module 2 (geometric median) is most useful when wrong agents form a spatially coherent cluster in embedding space. Its robustness comes from minimizing the sum of distances rather than squared distances. Squaring gives disproportionate weight to outliers, so the arithmetic mean can be pulled far from the honest majority by a coordinated wrong-answer cluster. By minimizing unsquared distances, the geometric median limits this influence: a minority of fewer than half the agents cannot move it arbitrarily far from the honest majority. The centroid shift results (+0.240 to +0.290 embedding units, positive across all conditions and both models) support this mechanism empirically, though geometric proximity to the honest cluster does not guarantee that the nearest-centroid agent's text matches the correct answer.
 
 ### 8.2 Deprecated Aggregation Variants
 
@@ -363,7 +363,7 @@ Two aggregation variants were explored before the final stage1-only framing.
 
 The first is bidirectional NLI entailment verification. It was designed to check whether the nearest-centroid candidate entails and is entailed by the second-nearest agent's output. This path is retained in the repository for provenance and helper reuse, but it is not the reported `full_pipeline` condition in Experiment 3.
 
-The second is distance-weighted answer voting. This is the `full_pipeline` condition in the reported Experiment 3 results. It underperforms stage1_only in every reported Exp 3 condition. Its main failure mode is vote fragmentation: semantically diverse correct answers can split weighted vote mass, while a coordinated wrong-answer cluster concentrates weight on one extractable answer. For the reported results, stage1_only is the recommended configuration.
+The second is distance-weighted answer voting. This is the `full_pipeline` condition in the reported Experiment 3 results. It underperforms stage1_only in every reported Exp 3 condition. Its main failure mode is vote fragmentation: semantically diverse correct answers can split weighted vote mass, while a coordinated wrong-answer cluster concentrates weight on one extractable answer. Based on these results, the distance-weighted variant is not recommended; TopKMass filtering combined with geometric median nearest-centroid is the preferred configuration for the coordinated-attack setting.
 
 ### 8.3 BFT Framing: Scope and Limitations
 
@@ -385,9 +385,9 @@ The current evaluation uses a homogeneous pool (N samples from one model). In th
 
 ## 9. Conclusion
 
-We have presented a failure-mode-specific study of multi-agent LLM consensus under two structurally distinct failure modes of self-consistency. Strict answer extraction prevents invalid outputs from entering the vote pool as raw-text keys. TopKMass filtering identifies low-confidence invalid-format outputs using a stable-region sliding-window mean of top-5 token probabilities. Geometric median nearest-centroid aggregation provides a separate mechanism for coordinated valid-format wrong answers by minimizing sum of embedding distances rather than sum of squared distances.
+We have presented a failure-mode-specific study of multi-agent LLM consensus under two structurally distinct failure modes of self-consistency. Strict answer extraction prevents invalid outputs from being counted as votes by abstaining when no parseable answer is found. TopKMass filtering identifies low-confidence invalid-format outputs using a stable-region sliding-window mean of top-5 token probabilities. Geometric median nearest-centroid aggregation provides a separate mechanism for coordinated valid-format wrong answers by minimizing sum of embedding distances rather than sum of squared distances.
 
-The primary Experiment 1 result is a methodology finding: strict answer extraction corrects a 16.5pp collapse in one LLaMA high-fault baseline, and TopKMass filtering plus strict majority vote has the highest observed average accuracy for invalid-format faults. Experiment 2 validates TopKMass as the strongest of the tested logprob-based correctness predictors (AUC=0.612 for LLaMA, vs. 0.580 for negated entropy and 0.448 for negated logprob variance), while confirming that its primary value is detecting broken agents far outside the clean cluster rather than discriminating correct from incorrect among healthy agents. Experiment 3 shows that geometric median nearest-centroid improves LLaMA accuracy by 7.5pp over majority vote under coordinated synthetic wrong-answer injection. Multi-provider experiments delineate the scope of this defense: it requires coordinated wrong answers forming a tight cluster and does not extend to natural provider diversity or scattered provider bias in this evaluation.
+The primary Experiment 1 result is a methodology finding: strict answer extraction corrects a 16.5 percentage point accuracy collapse in LLaMA majority-vote results at high fault fractions, and TopKMass filtering plus strict majority vote has the highest observed average accuracy for invalid-format faults. Experiment 2 validates TopKMass as the strongest of the tested logprob-based correctness predictors (AUC=0.612 for LLaMA, vs. 0.580 for negated entropy and 0.448 for negated logprob variance), while confirming that its primary value is detecting broken agents far outside the clean cluster rather than discriminating correct from incorrect among healthy agents. Experiment 3 shows that geometric median nearest-centroid improves LLaMA accuracy by 7.5pp over majority vote under coordinated synthetic wrong-answer injection. Multi-provider experiments delineate the scope of this defense: it requires coordinated wrong answers forming a tight cluster and does not extend to natural provider diversity or scattered provider bias in this evaluation.
 
 No single pipeline condition is uniformly optimal. Strict extraction and TopKMass filtering are most useful for invalid-format failures; geometric median nearest-centroid is most useful when wrong answers form a coordinated semantic cluster; majority vote remains simpler and at least as effective under several uncoordinated regimes. Understanding the specific conditions under which each mechanism helps, supported by mechanistic metrics such as TopKMass AUC and centroid shift, is the primary contribution of this work.
 
@@ -442,7 +442,7 @@ Figure A2 (`results/exp2_qwen/experiment_2_signals.png`) presents the three-pane
 | Qwen2.5 7B | hard_only | 7 | 13.75% | 16.25% | 26.25% | 100.0% (F1/F3) |
 | Qwen2.5 7B | full_system | 7 | 13.75% | 16.25% | 26.25% | 100.0% (F1/F3) |
 
-At beta=0.45 with N=7, floor(7 x 0.45) = 3 faults. The BFT threshold is 2f+1 = 5 agents. With 3 F1 or F3 agents filtered by Module 1, only 4 agents remain, which is below the threshold, and liveness fires at 100% of questions. Hard_only and full_system are therefore equivalent to the unfiltered baseline under F1/F3 at beta=0.45 N=7. The difference between conditions at beta=0.45 in Table 1 and Table 2 is driven by F2 (Byzantine) questions, where spoofed logprobs pass Module 1 and filtering remains active.
+At beta=0.45 with N=7, floor(7 x 0.45) = 3 faults. The BFT threshold is 2f+1 = 5 agents. With 3 F1 or F3 agents filtered by Module 1, only 4 agents remain, which is below the threshold, and the liveness fallback triggers at 100% of questions. Hard_only and full_system are therefore equivalent to the unfiltered baseline under F1/F3 at beta=0.45 N=7. The difference between conditions at beta=0.45 in Table 1 and Table 2 is driven by F2 (Byzantine) questions, where spoofed logprobs pass Module 1 and filtering remains active.
 
 ### A.4 Reproducibility: Code Paths and Result Artifacts
 
