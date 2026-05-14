@@ -252,7 +252,7 @@ def plot_adversarial_combined(
     plt.tight_layout()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     print(f"Saved → {output_path}")
     plt.close()
 
