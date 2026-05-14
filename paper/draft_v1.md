@@ -92,11 +92,17 @@ TopKMass(t) = (1 / min(t+1, W)) * sum_{i=max(0, t-W+1)}^{t} sum_{k=1}^{5} exp(lo
 
 This is implemented in O(T) via prefix sums (`numpy.cumsum`), avoiding an O(T x W) inner loop.
 
+The scalar score for each agent is derived in three steps:
+
+1. **Trajectory:** at each token position, sum the top-5 token probabilities using the W=64 causal sliding window, producing one value per token position.
+2. **Post-warmup:** skip the first W positions, where the window is only partially filled and scores are systematically lower. The stable portion starts at position W=64.
+3. **Mean:** average the stable-region values into a single scalar per agent.
+
 **Warmup normalization.** For outputs shorter than 2W tokens (common in StrategyQA with max_tokens=128), a large fraction of the trajectory is in the warmup region where the window is partially filled and scores are systematically lower than the stable-state value. Without correction, a single global threshold tau would penalize short outputs relative to long ones. The stable-region mean is computed on the trajectory slice at positions [W:], falling back to the full trajectory when output length is at most W. This is applied identically in both filtering and tau calibration, ensuring the same metric is used throughout.
 
 **Threshold calibration.** Tau is calibrated at the 5th percentile of stable-region TopKMass scores on a 20% shuffled dev slice. Shuffling is critical: the cache orders GSM8K questions first (indices 0-49), and without shuffling the dev slice draws entirely from higher-confidence GSM8K questions, biasing tau upward and causing approximately 50% liveness fallback at beta=0. With shuffling (fixed seed=42), the 5th-percentile tau is calibrated on a representative mix and produces approximately 5% clean-agent false rejection.
 
-**Liveness fallback.** The tolerated fault count is f = floor((N-1)/3) (N=7 gives f=2; N=5 gives f=1). If fewer than 2f+1 agents pass filtering, all available agents are admitted and `is_low_confidence=True` is set. This ensures the pipeline always returns an answer, at the cost of reduced confidence.
+**Liveness fallback.** The tolerated fault count is f = floor((N-1)/3) (N=7 gives f=2; N=5 gives f=1). If fewer than 2f+1 agents pass filtering, all available agents are admitted and the result is flagged as low-confidence. This ensures the pipeline always produces an answer.
 
 The table below summarizes the expected behavior by injected fault type.
 
@@ -117,22 +123,22 @@ Admitted agents' output texts are embedded using `sentence-transformers/all-mpne
 f(y) = sum_{i=1}^{N} ||x_i - y||_2
 ```
 
-via L-BFGS-B with analytic gradient `grad f(y) = -sum (x_i - y) / ||x_i - y||_2` and denominator clamping at 1e-10. The final answer is the `output_text` of the agent with minimum Euclidean distance to this geometric median (nearest-centroid selection). The reported homogeneous experiments use this nearest-centroid selector for the Experiment 1 `full_system` condition and the Experiment 3 `stage1_only` condition. Implementation provenance is provided in Appendix A.4.
+via L-BFGS-B with analytic gradient `grad f(y) = -sum (x_i - y) / ||x_i - y||_2` and denominator clamping at 1e-10. The final answer is the `output_text` of the agent with minimum Euclidean distance to this geometric median (nearest-centroid selection). The reported homogeneous experiments use this nearest-centroid selector for the primary pipeline condition, named `full_system` in Experiment 1 and `stage1_only` in Experiment 3. Implementation provenance is provided in Appendix A.4.
 
 Earlier aggregation variants included bidirectional NLI verification and distance-weighted answer voting. These are retained only as ablations and are not the recommended geometric-median condition.
 
 ### 3.4 Ablation Conditions
 
-| Condition | Module 1 | Aggregation |
+| Condition | TopKMass role | Aggregation |
 |---|---|---|
 | `baseline` | None | Strict majority vote with abstention on unparseable outputs |
-| `soft_weighting` | None (scores as weights) | TopKMass-weighted geometric median |
-| `hard_only` | TopKMass filter + liveness | Strict majority vote |
-| `full_system` / `stage1_only` | TopKMass filter + liveness | Geometric median nearest-centroid |
+| `soft_weighting` | Aggregation weights (no admission threshold) | TopKMass-weighted geometric median |
+| `hard_only` | Hard admission filter + liveness fallback | Strict majority vote |
+| `full_system` / `stage1_only` | Hard admission filter + liveness fallback | Geometric median nearest-centroid |
 
 ### 3.5 Fault Injection
 
-The fault injector (`faults/injector.py`) applies deterministic mutations to cached data. Exactly floor(N x beta) agents are mutated per question, selected via `random.Random(seed).sample`. F1 agents receive empty `output_text` and `token_logprobs`. F2 agents receive a pre-specified wrong answer string and logprobs spoofed to TopKMass=1.00. F3 agents receive syntactically plausible off-task text and logprobs spoofed to -10.0 per entry. The `mix` condition assigns each mutated agent an independently drawn fault type. Original AgentGeneration objects are never mutated; clean agents are returned by reference.
+The fault injector (`faults/injector.py`) applies deterministic mutations to cached data. Exactly floor(N x beta) agents are mutated per question, selected via `random.Random(seed).sample`. F1 agents receive empty `output_text` and `token_logprobs`. F2 agents receive a pre-specified wrong answer string and logprobs spoofed to TopKMass=1.00. F3 agents receive syntactically plausible off-task text and token logprobs set uniformly to -10.0, producing a TopKMass score of approximately 2.3×10⁻⁴ and causing reliable filter rejection. The `mix` condition assigns each mutated agent an independently drawn fault type. Original AgentGeneration objects are never mutated; clean agents are returned by reference.
 
 ---
 
@@ -142,7 +148,7 @@ The fault injector (`faults/injector.py`) applies deterministic mutations to cac
 
 We evaluate four pipeline conditions across N in {5, 7} agents, beta in {0, 0.15, 0.30, 0.45} fault fraction, and fault types {F1, F2, F3, mix} on 100 questions (50 GSM8K multi-step arithmetic, 50 StrategyQA commonsense yes/no). LLaMA 3.1 8B Instruct and Qwen2.5 7B Instruct each receive their own cached generation sets (N=7 agents, temperature=0.7, max_tokens=512 for GSM8K and 128 for StrategyQA). Tau is auto-calibrated per run.
 
-Strict answer extraction is applied to `baseline` and `hard_only`: agents whose output contains no parseable answer (no `yes`/`no` match for StrategyQA; no numeric token for GSM8K) return `None` and are excluded from the vote. This is the V4 methodology; earlier runs without strict extraction showed a 16.5pp LLaMA collapse at beta=0.45.
+Strict answer extraction is applied to `baseline` and `hard_only`: agents whose output contains no parseable answer return `None` and are excluded from the vote. Earlier runs without strict extraction showed a 16.5 percentage point LLaMA accuracy collapse at beta=0.45, which this methodology corrects.
 
 ### 4.2 Results
 
@@ -174,7 +180,7 @@ The N=1 single-agent reference is immune to fault injection (floor(1 x beta) = 0
 
 **Finding 3: soft_weighting is strongest in the high-drifter cell.** At N=7, beta=0.45, F3-only, LLaMA soft_weighting achieves 0.725 vs. 0.638 for baseline. At high drifter fractions, Module 1 hard-filters all F3 agents, triggering liveness fallback at 100% of questions and reverting to the full pool. Soft-weighting avoids this by continuously down-weighting low-confidence agents rather than hard-filtering them.
 
-**Finding 4: full_system underperforms for invalid-format faults.** At beta=0.45, full_system is 5.4pp below hard_only for LLaMA (0.653 vs. 0.727). When liveness fires and the full pool is admitted (including drifter or crash agents), geometric median in embedding space can be drawn toward outlier embeddings even while strict majority vote correctly ignores agents with no parseable answer. This is not a failure of the geometric median mechanism; it is a consequence of the liveness fallback providing no protection against invalid-format embeddings. The advantage of full_system emerges in Experiment 3, where the threat structure is different.
+**Finding 4: full_system underperforms for invalid-format faults.** At beta=0.45, full_system is 5.4pp below hard_only for LLaMA (0.653 vs. 0.727). When the liveness fallback triggers and admits the full pool (including drifter or crash agents), geometric median in embedding space can be drawn toward outlier embeddings even while strict majority vote correctly ignores agents with no parseable answer. This is not a failure of the geometric median mechanism; it is a consequence of the liveness fallback providing no protection against invalid-format embeddings. The advantage of full_system emerges in Experiment 3, where the threat structure is different.
 
 **Finding 5: Qwen beta=0 fallback rate is elevated.** At beta=0, hard_only and full_system trigger liveness fallback on 13.75% of Qwen questions (vs. 5.0% for LLaMA). Qwen's stable-region TopKMass scores cluster lower than LLaMA's, so the 5th-percentile tau cuts more clean Qwen agents. This is a calibration artifact that causes Module 1 to do less useful work under clean conditions for Qwen; accuracy recovers via the liveness fallback (reverting to full pool), but the elevated fallback rate reduces the filter's net contribution.
 
@@ -192,7 +198,7 @@ Experiment 2 evaluates TopKMass as a filter signal by measuring its predictive v
 - **Negated mean token entropy:** `-mean(-sum(p * log p))` over token positions, using top-5 unnormalized probabilities.
 - **Negated logprob variance:** `-var(mean logprob per position)`, negated so higher is better (lower variance = more stable confidence).
 
-All signals are oriented so that higher values indicate greater confidence (more likely correct). ROC AUC and Average Precision (AP) are computed for each signal as a binary correctness classifier.
+All signals are oriented so that higher values indicate greater confidence (more likely correct). Receiver operating characteristic area under the curve (ROC-AUC) and average precision (AP) are computed for each signal as a binary correctness classifier.
 
 ### 5.2 Results
 
@@ -210,7 +216,9 @@ All signals are oriented so that higher values indicate greater confidence (more
 
 **Logprob variance performs below chance for LLaMA (AUC=0.448).** High logprob variance reflects natural variation in token confidence across a multi-step reasoning chain (for example, arithmetic steps alternating with reasoning steps at different confidence levels), not output unreliability. Using variance as a filter signal would disadvantage models on precisely the tasks (multi-step reasoning) where they perform strongly. This negative result supports the sliding-window design of TopKMass, which measures confidence stability across the sequence rather than raw variance.
 
-**No signal is a correctness oracle.** Both correct and incorrect agents cluster in a narrow high-confidence range ([0.96, 1.00] for LLaMA, [0.94, 1.00] for Qwen) with heavy overlap. The correct-agent TopKMass median is shifted slightly right relative to incorrect agents (0.988 vs. 0.981 for LLaMA, a gap of 0.007), but no threshold cleanly separates the two classes. TopKMass's primary value as a filter is detecting agents far outside this clean cluster: F1 agents score exactly 0.0 (empty logprobs), F3 drifter agents score ~2.3 x 10^-4 (logprob spoof: -10.0 per entry). These are detectable at any tau > 0.001, which explains why Module 1 can remove crash and drifter agents while retaining most clean agents in this evaluation.
+**No signal is a correctness oracle.** Both correct and incorrect agents cluster in a narrow high-confidence range ([0.96, 1.00] for LLaMA, [0.94, 1.00] for Qwen) with heavy overlap. The correct-agent TopKMass median is higher than the incorrect-agent median (0.988 vs. 0.981 for LLaMA, a gap of 0.007; see Figure 4, Panel B), but no threshold cleanly separates the two classes.
+
+> **[Figure: `results/exp2_llama/topkmass_distribution.png` — histogram of TopKMass score distributions for correct vs. incorrect agents, showing the narrow overlap region. Fault-agent scores (F1: 0.0, F3: ~2.3×10⁻⁴) are noted as off-scale.]** TopKMass's primary value as a filter is detecting agents far outside this clean cluster: F1 agents score exactly 0.0 (empty logprobs), F3 drifter agents score ~2.3 x 10^-4 (logprob spoof: -10.0 per entry). These are detectable at any tau > 0.001, which explains why Module 1 can remove crash and drifter agents while retaining most clean agents in this evaluation.
 
 See Figure 4 for ROC curves, TopKMass scatter, and Precision-Recall curves.
 
