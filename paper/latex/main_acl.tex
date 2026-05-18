@@ -68,10 +68,10 @@
 
 % ============================================================
 \begin{abstract}
-Multi-agent LLM ensembles often aggregate independent completions using
-self-consistency, a majority vote over extracted answers. This paper studies
-two failure modes of that procedure and argues that they require different
-defenses rather than a single universally optimal consensus rule. Invalid-format
+Multi-agent LLM ensembles often aggregate independent completions with
+self-consistency, a majority vote over extracted answers. We study two failure
+modes of this procedure and argue that they require different defenses rather
+than a single universally optimal consensus rule. Invalid-format
 outputs, such as empty or off-task generations, can contaminate voting when
 answer extraction falls back to raw text. Coordinated valid-format wrong answers
 create a separate problem: a small group of syntactically valid wrong answers can
@@ -81,11 +81,12 @@ answer is found (strict extraction), rather than treating malformed output as a
 vote; a sliding-window token-probability filter (TopKMass); and an
 embedding-space geometric median selector.
 
-Across experiments on LLaMA 3.1 8B and Qwen2.5 7B using 100 questions from
-GSM8K and StrategyQA, strict answer extraction corrects a 16.5 percentage point
+Across experiments on LLaMA 3.1 8B and Qwen2.5 7B using 100 cached questions
+from GSM8K and StrategyQA with an 80-question held-out evaluation split per
+model, strict answer extraction corrects a 16.5 percentage point
 accuracy collapse in LLaMA majority-vote results at high fault fractions, and
-TopKMass filtering plus strict majority vote has the highest observed average
-accuracy under invalid-format faults. TopKMass is the strongest of three tested
+the all-fault aggregate shows the strongest $\beta=45\%$ result for TopKMass
+filtering plus strict majority vote. TopKMass is the strongest of three tested
 logprob-based correctness signals (LLaMA AUC/AP 0.612/0.810; Qwen 0.635/0.776),
 although its absolute discriminative power is modest. Under coordinated synthetic
 wrong-answer injection, geometric median nearest-centroid improves LLaMA
@@ -106,12 +107,12 @@ independent completions and aggregating their answers. The most common
 aggregation rule is self-consistency \citep{wang2023self}: extract a final answer
 from each completion and return the plurality answer. This rule is simple and
 effective when errors are independent and answer extraction is reliable, but it
-provides little guidance about how to handle malformed outputs, confidence
-signals, or coordinated wrong answers.
+offers little guidance for malformed outputs, confidence signals, or coordinated
+wrong answers.
 
-We study these issues through a failure-mode-specific lens. The core observation
-is that self-consistency can fail for qualitatively different reasons, and
-defenses that help in one regime can be neutral or harmful in another.
+We study these issues through a failure-mode-specific lens. Self-consistency can
+fail for qualitatively different reasons, and defenses that help in one regime
+can be neutral or harmful in another.
 
 \paragraph{Failure Mode 1: invalid-format outputs.}
 Some completions contain no parseable final answer. If extraction falls back to
@@ -179,9 +180,9 @@ is the standard approach to multi-sample LLM aggregation: sample $N$
 chain-of-thought completions, extract the final answer token from each, and
 return the plurality answer. Our work takes self-consistency as the primary
 baseline, identifies its failure modes under fault injection and coordinated
-attack, and proposes complementary mechanisms to address each failure mode. The
-strict extraction fix (abstaining when no parseable answer is found) is itself a
-methodology improvement applicable to any self-consistency implementation.
+attack, and proposes complementary mechanisms to address each failure mode.
+Strict extraction (abstaining when no parseable answer is found) is also a
+methodological improvement applicable to any self-consistency implementation.
 
 \paragraph{DecentLLMs \citep{jo2024decentllms}}
 is the closest prior system-level approach. DecentLLMs uses a worker/evaluator
@@ -190,8 +191,8 @@ several criteria, and the geometric median is applied over the resulting score
 matrix to select a winner. The key difference is the aggregation space:
 DecentLLMs applies geometric median in criterion score space (evaluator ratings),
 while our system applies geometric median in sentence embedding space (output
-text semantics). The two approaches address different failure modes; DecentLLMs
-does not expose per-token logprobs and therefore cannot perform
+text semantics). The two approaches address different failure modes; the
+published DecentLLMs method does not use per-token logprobs for
 confidence-based pre-filtering.
 
 \paragraph{Byzantine Fault Tolerance \citep{lamport1982byzantine,castro1999practical}}
@@ -226,11 +227,11 @@ geometric median rather than $k$-means or nearest-neighbor clustering, providing
 a different robustness objective for clustered outliers.
 
 \paragraph{Calibration and per-token confidence \citep{guo2017calibration}}
-is the background for Module~1's signal design. TopKMass is a sliding-window
+motivate Module~1's signal design. TopKMass is a sliding-window
 stability measure (the mean sum of top-5 token probabilities over a $W=64$
-window) rather than an instantaneous per-token confidence. This design captures
-whether a model maintains high-confidence generation across a sequence, which is
-more predictive of output reliability than any single token's confidence.
+window) rather than an instantaneous per-token confidence. This design measures
+whether a model maintains high-confidence generation across a sequence and is
+the confidence signal evaluated in our experiments.
 
 % ============================================================
 \section{System Description}
@@ -293,22 +294,22 @@ The scalar score for each agent is derived in three steps:
   \item \textbf{Trajectory:} at each token position, sum the top-5 token
         probabilities using the $W=64$ causal sliding window, producing one
         value per token position.
-  \item \textbf{Post-warmup:} skip the first $W$ positions, where the window
-        is only partially filled and scores are systematically lower than the
-        stable-state value. The stable portion starts at position $W=64$.
+  \item \textbf{Post-warmup:} skip the first $W$ positions so the scalar score
+        is computed from the same steady-state portion of each trajectory. The
+        stable portion starts at position $W=64$.
   \item \textbf{Mean:} average the stable-region values into a single scalar
         per agent.
 \end{enumerate}
 
 \paragraph{Warmup normalization.}
 For outputs shorter than $2W$ tokens (common in StrategyQA with
-\texttt{max\_tokens}$=128$), a large fraction of the trajectory is in the warmup
-region where scores are systematically lower than the stable-state value.
-Without correction, a single global threshold $\tau$ would penalize short
-outputs relative to long ones. The stable-region mean is computed on the
-trajectory slice at positions $[W{:}]$, falling back to the full trajectory when
-output length is at most $W$. This is applied identically in both filtering and
-$\tau$ calibration, ensuring the same metric is used throughout.
+\texttt{max\_tokens}$=128$), a large fraction of the trajectory lies in the
+initial region before a full-window steady state is available. We therefore use
+the post-warmup slice as the canonical per-agent statistic so short and long
+outputs are scored from the same portion of the trajectory. The stable-region
+mean is computed on positions $[W{:}]$, falling back to the full trajectory when
+output length is at most $W$. This same statistic is used in filtering and
+$\tau$ calibration.
 
 \paragraph{Threshold calibration.}
 $\tau$ is calibrated at the 5th percentile of stable-region TopKMass scores on
@@ -344,7 +345,7 @@ F1 (crash)
 F3 (drifter)
   & ${\approx}2.3{\times}10^{-4}$ (logprob spoof: $-10.0$ per entry)
   & Dropped (below any $\tau > 0.001$) \\
-F2 (Byzantine)
+F2 (Experiment~1 invalid-format injection)
   & 1.00 (logprob spoof: sum $= 1.00$ exactly)
   & \textbf{Passes} at any $\tau \leq 1.0$ \\
 Clean agent
@@ -355,7 +356,7 @@ Clean agent
 }
 \end{table*}
 
-F2 Byzantine logprobs are spoofed to TopKMass$=1.00$ (not 0.9999) because
+Experiment~1 F2 logprobs are spoofed to TopKMass$=1.00$ (not 0.9999) because
 high-precision models (notably Qwen2.5) produce clean-agent scores up to
 ${\approx}0.9951$; the exact value 1.00 is required to avoid inadvertent
 filtering of Byzantine agents.
@@ -396,6 +397,10 @@ and are not the recommended geometric-median condition.
 \subsection{Ablation Conditions}
 \label{sec:conditions}
 
+Experiment~1 reports the homogeneous ablations below. Experiment~3 reuses the
+nearest-centroid method as \texttt{stage1\_only} and reports
+\texttt{full\_pipeline} only for the distance-weighted voting ablation.
+
 \begin{table*}[!t]
 \centering
 \caption{Pipeline conditions used in Experiment~1 and Experiment~3.}
@@ -430,11 +435,13 @@ and are not the recommended geometric-median condition.
 The fault injector (\texttt{faults/injector.py}) applies deterministic mutations
 to cached data. Exactly $\lfloor N \times \beta \rfloor$ agents are mutated per
 question, selected via \texttt{random.Random(seed).sample}. F1 agents receive
-empty \texttt{output\_text} and \texttt{token\_logprobs}. F2 agents receive a
-pre-specified wrong answer string and logprobs spoofed to TopKMass$=1.00$. F3
-agents receive syntactically plausible off-task text and token logprobs set
+empty \texttt{output\_text} and \texttt{token\_logprobs}. In Experiment~1, F2
+agents receive a fixed unparseable wrong-answer template and logprobs spoofed to
+TopKMass$=1.00$; this construction is distinct from the valid-format
+coordinated wrong-answer injection studied in Experiment~3. F3 agents receive
+syntactically plausible off-task text and token logprobs set
 uniformly to $-10.0$, producing a TopKMass score of approximately
-$2.3\times10^{-4}$ and causing reliable filter rejection. The \texttt{mix}
+$2.3\times10^{-4}$ and reliably triggering filter rejection. The \texttt{mix}
 condition assigns each mutated agent an independently drawn fault type. Original
 \texttt{AgentGeneration} objects are never mutated; clean agents are returned by
 reference.
@@ -448,16 +455,17 @@ reference.
 
 We evaluate four pipeline conditions across $N \in \{5,7\}$ agents,
 $\beta \in \{0,\,0.15,\,0.30,\,0.45\}$ fault fraction, and fault types
-\{F1, F2, F3, mix\} on 100 questions (50 GSM8K multi-step arithmetic,
+\{F1, F2, F3, mix\} on 100 cached questions (50 GSM8K multi-step arithmetic,
 50 StrategyQA commonsense yes/no). LLaMA 3.1 8B Instruct \citep{metaai2024llama} and Qwen2.5 7B
 Instruct \citep{qwenteam2024qwen25} each receive their own cached generation sets ($N=7$ agents,
 temperature$=0.7$, \texttt{max\_tokens}$=512$ for GSM8K and 128 for
-StrategyQA). $\tau$ is auto-calibrated per run.
+StrategyQA). $\tau$ is auto-calibrated per run on a 20\% dev split; all reported
+accuracies use the remaining 80 evaluation questions per model.
 
 Strict answer extraction is applied to \texttt{baseline} and \texttt{hard\_only}:
 agents whose output contains no parseable answer return \texttt{None} and are
 excluded from the vote. Earlier runs without strict extraction showed a 16.5
-percentage point LLaMA accuracy collapse at $\beta=0.45$, which this methodology
+percentage point LLaMA accuracy collapse at $\beta=0.45$, which strict extraction
 corrects.
 
 \subsection{Results}
@@ -480,14 +488,14 @@ corrects.
 \midrule
 \multirow{4}{*}{LLaMA}
   & \texttt{baseline} (self-consistency) & 0.713 & 0.756 & 0.769 & 0.736 & 0.708 \\
-  & \texttt{soft\_weighting}             & 0.713 & 0.713 & 0.725 & 0.728 & 0.688 \\
+  & \texttt{soft\_weighting}             & 0.713 & 0.713 & 0.725 & 0.727 & 0.688 \\
   & \texttt{hard\_only}                  & 0.713 & 0.750 & 0.763 & 0.745 & \textbf{0.727} \\
   & \texttt{full\_system} (\texttt{stage1\_only}) & 0.713 & 0.700 & 0.723 & 0.733 & 0.653 \\
 \midrule
 \multirow{4}{*}{Qwen}
-  & \texttt{baseline} (self-consistency) & 0.675 & 0.669 & 0.669 & 0.673 & 0.648 \\
+  & \texttt{baseline} (self-consistency) & 0.675 & 0.669 & 0.663 & 0.672 & 0.648 \\
   & \texttt{soft\_weighting}             & 0.675 & 0.650 & 0.650 & 0.644 & 0.663 \\
-  & \texttt{hard\_only}                  & 0.675 & 0.669 & 0.669 & 0.675 & \textbf{0.656} \\
+  & \texttt{hard\_only}                  & 0.675 & 0.669 & 0.663 & 0.675 & \textbf{0.656} \\
   & \texttt{full\_system} (\texttt{stage1\_only}) & 0.675 & 0.650 & 0.650 & 0.644 & 0.645 \\
 \bottomrule
 \end{tabularx}
@@ -505,21 +513,23 @@ from GSM8K-only benchmarks.
 
 \paragraph{Finding 1: Strict extraction is the primary Experiment 1 result.}
 Without strict extraction, the LLaMA baseline at $\beta=0.45$ was 0.543; with
-strict extraction it is 0.708, a 16.5pp improvement. The gap arose because F2
-and F3 agents with unscorable outputs contributed their full text as vote keys,
-which could win plurality when parseable-answer agents did not form a single
+strict extraction it is 0.708, a 16.5pp improvement. The gap arose because the
+Experiment~1 F2 template and F3 agents have unscorable outputs that contributed
+their full text as vote keys. These keys could win plurality when
+parseable-answer agents did not form a single
 dominant extracted answer. Strict extraction removes these spurious votes. The
 4.1pp Qwen improvement (0.607 to 0.648) is smaller because Qwen's individual
 answer-extraction accuracy is higher, leaving fewer invalid votes. This isolates
 answer extraction as an important confound in self-consistency evaluation.
 
-\paragraph{Finding 2: \texttt{hard\_only} has the highest observed average
-accuracy for invalid-format faults.}
+\paragraph{Finding 2: \texttt{hard\_only} is strongest in the all-fault aggregate
+at high fault load.}
 At $\beta=0.45$, \texttt{hard\_only} outperforms \texttt{baseline} by 1.9pp for
 LLaMA (0.727 vs.\ 0.708) and by 0.8pp for Qwen (0.656 vs.\ 0.648). These small
 differences should be interpreted cautiously, but they are consistent with the
 intended mechanism: TopKMass filtering drops F1 and F3 agents before strict
-majority voting.
+majority voting. The invalid-format-only slices are less uniform, as the
+high-drifter cell in Finding~3 shows.
 
 \paragraph{Finding 3: \texttt{soft\_weighting} is strongest in the high-drifter
 cell.}
@@ -531,7 +541,7 @@ down-weighting low-confidence agents rather than hard-filtering them.
 
 \paragraph{Finding 4: \texttt{full\_system} underperforms for invalid-format
 faults.}
-At $\beta=0.45$, \texttt{full\_system} is 5.4pp below \texttt{hard\_only} for
+At $\beta=0.45$, \texttt{full\_system} is 7.4pp below \texttt{hard\_only} for
 LLaMA (0.653 vs.\ 0.727). When the liveness fallback triggers and admits the
 full pool (including drifter or crash agents), geometric median in embedding
 space can be drawn toward outlier embeddings even while strict majority vote
@@ -541,12 +551,13 @@ different.
 
 \paragraph{Finding 5: Qwen $\beta=0$ fallback rate is elevated.}
 At $\beta=0$, \texttt{hard\_only} and \texttt{full\_system} trigger liveness
-fallback on 13.75\% of Qwen questions (vs.\ 5.0\% for LLaMA). Qwen's
-stable-region TopKMass scores cluster lower than LLaMA's, so the 5th-percentile
-$\tau$ cuts more clean Qwen agents. This is a calibration artifact; accuracy
-recovers via liveness fallback, but the elevated fallback rate reduces the
-filter's net contribution. Adaptive per-model $\tau$ calibration with larger dev
-slices could reduce this fallback rate.
+fallback on 13.75\% of Qwen questions (vs.\ 5.0\% for LLaMA). Although Qwen's
+overall clean TopKMass scores are higher, its 5th-percentile threshold still
+removes enough clean agents in some rounds to trigger more liveness fallbacks.
+Accuracy recovers via liveness fallback, but this calibration artifact reduces
+the filter's net contribution. Adaptive
+per-model $\tau$ calibration with larger dev slices could reduce this fallback
+rate.
 
 See Figure~\ref{fig:accuracy-beta} for accuracy vs.\ $\beta$ line charts and
 Figure~\ref{fig:fault-breakdown} for per-fault-type breakdown at $\beta=0.45$.
@@ -792,7 +803,7 @@ coordinated injection.}
 Under uncoordinated conditions, majority vote outperforms geometric median
 nearest-centroid (72.5\% vs.\ 67.5\%) because the two diverse wrong-answer
 embeddings do not form a cluster. Under coordinated injection, the two injected
-agents unify on a single wrong answer, reducing majority vote accuracy to 62.5\%.
+agents return the same wrong answer, reducing majority vote accuracy to 62.5\%.
 Geometric median nearest-centroid reaches 70.0\%, a 7.5pp improvement over
 majority vote in this setting.
 
@@ -808,9 +819,9 @@ condition for this experiment.
 \paragraph{Finding 3: Qwen Experiment~3 is neutral.}
 Under coordinated injection, geometric median nearest-centroid and majority vote
 both achieve 65.0\% accuracy for Qwen. The liveness fallback rate for geometric
-median nearest-centroid is 11.25\% (vs.\ 2.5\% for LLaMA): Qwen's lower
-TopKMass distribution causes Module~1 to over-filter clean agents, reverting to
-the full 7-agent pool on roughly 1 in 9 questions. The centroid shift deltas
+median nearest-centroid is 11.25\% (vs.\ 2.5\% for LLaMA): Qwen's calibrated
+threshold removes enough clean agents to trigger fallback on roughly 1 in 9
+questions, reverting to the full 7-agent pool. The centroid shift deltas
 remain positive ($+0.282$ to $+0.290$), but this mechanistic signal is not
 sufficient to produce an accuracy gain for Qwen. Adaptive $\tau$ calibration
 tuned to Qwen's score distribution (Section~\ref{sec:conclusion}, future
@@ -868,16 +879,16 @@ no fault injection. Per-provider $\tau$ calibration was applied.
 \end{tabular}
 \end{table*}
 
-The multi-provider pool does not exceed the strongest single provider:
+The multi-provider pool does not outperform the strongest single provider:
 \texttt{multi\_provider} achieves 67.5\% vs.\ \texttt{single\_llama} at 68.75\%
 ($-1.25$pp). This small difference should be interpreted cautiously, but it
 indicates that provider diversity alone, without coordinated failures among wrong
-agents, does not provide an observed accuracy advantage in this setup.
+agents, yields no observed accuracy advantage in this setup.
 
 \subsection{Experiment B: Biased Provider Injection}
 \label{sec:exp-b}
 
-Experiment~B tests whether geometric median can absorb a systematically biased
+Experiment~B tests whether geometric median can tolerate a systematically biased
 provider. Two designated biased providers (phi3, mistral) are evaluated under
 natural bias (as-is generation) and injected bias (F1/F2 fault injection),
 compared to an oracle condition (biased provider removed entirely).
@@ -950,8 +961,8 @@ disappears.
 \label{sec:thesis}
 
 The experimental results support a unified thesis: the two structural failure
-modes of self-consistency require distinct mechanisms to address, and no single
-pipeline condition is optimal for both.
+modes of self-consistency require distinct mechanisms, and no single pipeline
+condition is optimal for both.
 
 \begin{table*}[t]
 \centering
@@ -971,7 +982,7 @@ F1 crash / F3 drifter (invalid-format)
     $\beta=0.45$, F3-only
   & Module~1 drops low-confidence agents; liveness fallback matters
     when overloaded \\[6pt]
-F2 Byzantine (spoofed logprob, scattered)
+Experiment~1 F2 injection (spoofed logprob, invalid-format)
   & \texttt{hard\_only}
   & Spoofed agents pass Module~1; strict extraction and majority vote
     handles scattered wrong answers \\[6pt]
@@ -989,7 +1000,7 @@ Diverse provider bias (Exp~A/B)
 
 Module~1 is effective when the broken agents fall far outside the clean TopKMass
 cluster (F1 score$=0$, F3 score${\approx}2.3\times10^{-4}$). It is deliberately
-ineffective against F2 Byzantine agents (TopKMass$=1.00$ by design), because
+ineffective against Experiment~1 F2 agents (TopKMass$=1.00$ by design), because
 real logprob spoofing is a realistic threat in deployed systems and a filter that
 is defeatable by logprob manipulation provides false assurance.
 
@@ -1011,14 +1022,15 @@ nearest-centroid agent's text matches the correct answer.
 Two aggregation variants were explored before the final \texttt{stage1\_only}
 framing.
 
-The first is bidirectional NLI entailment verification. It was designed to check
+The first variant is bidirectional NLI entailment verification, designed to check
 whether the nearest-centroid candidate entails and is entailed by the
 second-nearest agent's output. This path is retained in the repository for
 provenance and helper reuse, but it is not the reported \texttt{full\_pipeline}
 condition in Experiment~3.
 
-The second is distance-weighted answer voting. This is the \texttt{full\_pipeline}
-condition in the reported Experiment~3 results. It underperforms \texttt{stage1\_only}
+The second variant is distance-weighted answer voting, the
+\texttt{full\_pipeline} condition in the reported Experiment~3 results. It
+underperforms \texttt{stage1\_only}
 in every reported condition. Its main failure mode is vote fragmentation:
 semantically diverse correct answers can split weighted vote mass, while a
 coordinated wrong-answer cluster concentrates weight on one extractable answer.
@@ -1037,8 +1049,9 @@ thresholds. It should not be interpreted as a claim that the system provides
 Byzantine-fault-tolerant consensus in the classical sense.
 
 The current evaluation uses a homogeneous pool ($N$ samples from one model). In
-this setting, no agent has an incentive to deceive; F2 Byzantine injection is a
-synthetic stress test, not a real-world threat. The BFT framing becomes more
+this setting, no agent has an incentive to deceive; the Experiment~1 F2
+construction and the Experiment~3 coordinated attack are synthetic stress tests,
+not real-world threats. The BFT framing becomes more
 motivated in a multi-provider heterogeneous setting, where a provider operating
 one or more agents may have incentives to steer the consensus answer. The
 coordinated-attack defense is a hypothesis for coordinated provider failures, not
@@ -1070,8 +1083,9 @@ find neutral or negative results for multi-provider consensus under
 non-coordinated conditions.
 
 \paragraph{Synthetic fault injection.}
-F2 Byzantine agents use a fixed wrong-answer template and perfectly spoofed
-logprobs. Real-world failure modes may have different logprob signatures or
+Experiment~1 F2 agents use a fixed invalid-format template with perfectly
+spoofed logprobs, whereas Experiment~3 separately uses valid-format coordinated
+wrong answers. Real-world failure modes may have different logprob signatures or
 different patterns of answer coordination. The centroid shift metric provides
 mechanistic evidence about embedding-space behavior, but accuracy results may
 differ under different adversarial strategies.
@@ -1089,11 +1103,11 @@ probabilities. Geometric median nearest-centroid aggregation provides a separate
 mechanism for coordinated valid-format wrong answers by minimizing sum of
 embedding distances rather than sum of squared distances.
 
-The primary Experiment~1 result is a methodology finding: strict answer
-extraction corrects a 16.5 percentage point accuracy collapse in LLaMA
-majority-vote results at high fault fractions, and TopKMass filtering plus
-strict majority vote has the highest observed average accuracy for invalid-format
-faults. Experiment~2 validates TopKMass as the strongest of the tested
+The primary Experiment~1 result is methodological: strict answer extraction
+corrects a 16.5 percentage point accuracy collapse in LLaMA
+majority-vote results at high fault fractions, and the all-fault aggregate shows
+the strongest $\beta=45\%$ result for TopKMass filtering plus strict majority
+vote. Experiment~2 validates TopKMass as the strongest of the tested
 logprob-based correctness predictors (AUC$=0.612$ for LLaMA, vs.\ 0.580 for
 negated entropy and 0.448 for negated logprob variance), while confirming that
 its primary value is detecting broken agents far outside the clean cluster rather
@@ -1107,7 +1121,7 @@ provider diversity or scattered provider bias in this evaluation.
 No single pipeline condition is uniformly optimal. Strict extraction and TopKMass
 filtering are most useful for invalid-format failures; geometric median
 nearest-centroid is most useful when wrong answers form a coordinated semantic
-cluster; majority vote remains simpler and at least as effective under several
+cluster; majority vote remains simpler and at least as effective in several
 uncoordinated regimes. Understanding the specific conditions under which each
 mechanism helps, supported by mechanistic metrics such as TopKMass AUC and
 centroid shift, is the primary contribution of this work.
@@ -1161,7 +1175,7 @@ and (5) streaming consensus settings where agent count varies dynamically.
 \caption{Experiment~2 (Qwen2.5 7B): signal quality panels, parallel to
   Figure~\ref{fig:signals} in the main body. Qwen TopKMass AUC (0.635) exceeds
   LLaMA (0.612); negated entropy is a closer second for Qwen (AUC gap 0.019
-  vs.\ 0.032 for LLaMA). Logprob variance remains below chance for Qwen
+  vs.\ 0.032 for LLaMA). Logprob variance remains weak for Qwen
   (AUC$=0.538$, though above the LLaMA value of 0.448). The narrower TopKMass
   score range for Qwen ($[0.94,\,1.00]$) vs.\ LLaMA ($[0.79,\,1.00]$) reflects
   Qwen's generally higher per-token confidence and contributes to the calibration
@@ -1195,9 +1209,9 @@ Qwen2.5 7B   & \texttt{full\_system} & 7 & 13.75\% & 16.25\% & 26.25\% & 100\% (
 
 \texttt{hard\_only} and \texttt{full\_system} are therefore equivalent to the
 unfiltered baseline under F1/F3 at $\beta=0.45$, $N=7$. The difference between
-conditions at $\beta=0.45$ in Table~\ref{tab:exp1-results} is driven by F2
-(Byzantine) questions, where spoofed
-logprobs pass Module~1 and filtering remains active.
+conditions at $\beta=0.45$ in Table~\ref{tab:exp1-results} is driven by
+Experiment~1 F2 questions, where spoofed logprobs pass Module~1 and filtering
+remains active.
 
 \section{Reproducibility: Code Paths and Result Artifacts}
 \label{app:code}
@@ -1210,20 +1224,18 @@ final geometric median nearest-centroid helper is implemented in
 distance-weighted voting ablation used by the Experiment~3 \texttt{full\_pipeline}
 rows is implemented in \texttt{pipeline\_v2/aggregation.py}.
 
-The Experiment~1 runner is \texttt{eval/runner\_v2.py}; the Experiment~2
-signal-quality runner is \texttt{eval/signal\_quality.py}; the Experiment~3
-coordinated-injection runner is \texttt{eval/adversarial\_test\_v2.py}.
+The main runners are \texttt{eval/runner\_v2.py},
+\texttt{eval/signal\_quality.py}, and \texttt{eval/adversarial\_test\_v2.py}.
 Multi-provider experiments use \texttt{eval/runner\_multi.py},
-\texttt{eval/biased\_provider\_test.py}, and \texttt{pipeline\_multi/}. Shared
-cache loading and answer extraction helpers are in \texttt{eval/io.py} and
-\texttt{eval/answer\_extraction.py}.
+\texttt{eval/biased\_provider\_test.py}, and \texttt{pipeline\_multi/}; shared
+I/O helpers are in \texttt{eval/io.py} and \texttt{eval/answer\_extraction.py}.
 
 The main result artifacts are \texttt{results/experiment\_1\_llama\_v4.csv},
 \texttt{results/experiment\_1\_qwen\_v4.csv}, the Experiment~2 signal-quality
 directories under \texttt{results/exp2\_*}, the Experiment~3 \texttt{\_v2.csv}
-files under \texttt{results/exp3\_*}, and the multi-provider CSVs reported in
-Section~\ref{sec:multi}. No confidence intervals are reported because the
-canonical Experiment~1 and Experiment~3 CSVs contain aggregate accuracies rather
-than per-question correctness vectors.
+files under \texttt{results/exp3\_*}, and the multi-provider CSVs in
+Section~\ref{sec:multi}. Confidence intervals are omitted because the canonical
+Experiment~1 and Experiment~3 CSVs contain aggregate accuracies rather than
+per-question correctness vectors.
 
 \end{document}
