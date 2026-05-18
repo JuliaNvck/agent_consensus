@@ -188,7 +188,7 @@ Two models of the same ~7–8B parameter class, different architectures and trai
 
 | Signal | LLaMA AUC | LLaMA AP | Qwen AUC | Qwen AP |
 |---|---|---|---|---|
-| **TopKMass** | **0.606** | **0.802** | **0.627** | **0.765** |
+| **TopKMass** | **0.612** | **0.810** | **0.635** | **0.776** |
 | −Entropy | 0.580 | 0.791 | 0.616 | 0.765 |
 | −LogprobVar | 0.448 | 0.675 | 0.538 | 0.678 |
 
@@ -353,7 +353,7 @@ Two-panel line chart. X-axis: coordination degree (Uncoordinated, Coordinated, M
 **Figure 4: `results/exp2_llama/experiment_2_signals.png`** (or append to paper body)
 Three-panel figure for LLaMA signal quality. Panel A: ROC curves for TopKMass, −Entropy, −LogprobVar with AUC in legend. Panel B: TopKMass scatter (x=score, y=jittered correctness label) with per-class median lines. Panel C: Precision-Recall curves with AP in legend.
 
-*Draft caption:* "TopKMass signal quality for LLaMA 3.1 8B (700 agents, 100 questions × 7). Panel A: ROC curves — TopKMass (AUC=0.606) outperforms −Entropy (0.580) and −LogprobVariance (0.448, below chance). Panel B: Correct agents (green) cluster slightly higher than incorrect (red) but with heavy overlap — TopKMass is not a correctness oracle, but reliably identifies broken agents (crash/drifter) far below the clean cluster. Panel C: Precision-Recall curves confirm TopKMass's average precision advantage."
+*Draft caption:* "TopKMass signal quality for LLaMA 3.1 8B (700 agents, 100 questions × 7). Panel A: ROC curves — TopKMass (AUC=0.612) outperforms −Entropy (0.580) and −LogprobVariance (0.448, below chance). Panel B: Correct agents (green) cluster slightly higher than incorrect (red) but with heavy overlap — TopKMass is not a correctness oracle, but reliably identifies broken agents (crash/drifter) far below the clean cluster. Panel C: Precision-Recall curves confirm TopKMass's average precision advantage."
 
 ### Supplementary / Appendix Figures
 
@@ -414,12 +414,12 @@ Reference map for drafting. Each row is a paper section with its source material
 
 | # | Section | Key content | Key numbers |
 |---|---|---|---|
-| — | Abstract | Problem, two-layer approach, headline results | +7.5pp LLaMA Exp 3; hard_only best Exp 1; TopKMass AUC 0.606 beats entropy |
+| — | Abstract | Problem, two-layer approach, headline results | +7.5pp LLaMA Exp 3; hard_only best Exp 1; TopKMass AUC 0.612 beats entropy |
 | 1 | Introduction | Two failure modes; gap in self-consistency; contribution list (3–4 bullets) | 16.5pp strict-extraction fix; +7.5pp coordinated defense |
 | 2 | Related Work | Self-consistency, DecentLLMs, BFT, geometric median, MBR | — |
 | 3 | System | Phase 1/2; Module 1 math (TopKMass, τ calibration, warmup norm, liveness); Module 2 math (gm, nearest-centroid); fault injection | τ=5th pct, W=64, f=⌊(N−1)/3⌋ |
 | 4 | Experiment 1 | Setup; ablation table (Table 1); fault-type breakdown figure (Fig 2); strict-extraction fix discussion | hard_only 72.7% vs baseline 70.8%; soft best for F3 |
-| 5 | Experiment 2 | Signal validation; ROC/PR figure (Fig 4); interpretation | TopKMass AUC 0.606; logprob var AUC 0.448 |
+| 5 | Experiment 2 | Signal validation; ROC/PR figure (Fig 4); interpretation | TopKMass AUC 0.612; logprob var AUC 0.448 |
 | 6 | Experiment 3 | Adversarial coordination setup; accuracy table; centroid shift table; Exp 3 figure (Fig 3) | LLaMA +7.5pp; delta +0.240–0.290 |
 | 7 | Multi-Provider | Exp A/B; scope-of-defense interpretation; diversity ≠ coordination | Negative: majority vote wins; geometric median requires cluster cohesion |
 | 8 | Discussion | Two-failure-mode thesis; when each layer helps; NLI Stage 2 failure; BFT framing note | Table: failure mode → best condition |

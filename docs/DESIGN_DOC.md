@@ -361,7 +361,7 @@ python -m eval.signal_quality --cache cache_llma.json --output-dir results/exp2_
 
 | Signal | LLaMA AUC | LLaMA AP | Qwen AUC | Qwen AP |
 |---|---|---|---|---|
-| **TopKMass** | **0.606** | **0.802** | **0.627** | **0.765** |
+| **TopKMass** | **0.612** | **0.810** | **0.635** | **0.776** |
 | −Entropy | 0.580 | 0.791 | 0.616 | 0.765 |
 | −Logprob Var | 0.448 | 0.675 | 0.538 | 0.678 |
 
