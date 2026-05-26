@@ -205,8 +205,8 @@ system is not a BFT protocol: it is a one-shot aggregation pipeline with a
 confidence filter, and the setting is a homogeneous single-model pool where
 agents have no incentive to collude. The BFT framing motivates the liveness
 threshold ($2f+1$ admitted agents required, $f = \lfloor(N-1)/3\rfloor$) and the
-fault fraction regime ($\beta=0.45$ with $N=7$ corresponds to $f=3$, which is
-super-threshold and causes consistent liveness fallback).
+fault fraction regime ($\beta=0.45$ with $N=7$ injects $\lfloor7\times0.45\rfloor=3$ faults,
+exceeding the tolerance of $f=2$, which causes consistent liveness fallback).
 
 \paragraph{Geometric median robustness \citep{weiszfeld1937point,minsker2015geometric}}
 provides the theoretical foundation for the embedding-space selector. The
@@ -358,10 +358,11 @@ Clean agent
 }
 \end{table*}
 
-Experiment~1 F2 logprobs are spoofed to TopKMass$=1.00$ (not 0.9999) because
-high-precision models (notably Qwen2.5) produce clean-agent scores up to
-${\approx}0.9951$; the exact value 1.00 is required to avoid inadvertent
-filtering of Byzantine agents.
+Experiment~1 F2 logprobs are spoofed to TopKMass$=1.00$ because the construction
+$[\log(0.95),\log(0.02),\log(0.015),\log(0.010),\log(0.005)]$ gives top-5
+probabilities summing to exactly 1.00 per token position. This is the
+mathematical maximum of TopKMass and guarantees Byzantine agents pass Module~1
+at any $\tau \leq 1.00$, regardless of $\tau$ calibration.
 
 \subsection{Module 2: Geometric Median Nearest-Centroid}
 \label{sec:module2}
@@ -787,11 +788,11 @@ across all evaluation questions.
   & Qwen  & 0.347 & 0.066 & \textbf{$+$0.282} \\
 \midrule
 \multirow{2}{*}{Coordinated}
-  & LLaMA & 0.353 & 0.113 & \textbf{$+$0.240} \\
+  & LLaMA & 0.353 & 0.113 & \textbf{$+$0.239} \\
   & Qwen  & 0.366 & 0.076 & \textbf{$+$0.290} \\
 \midrule
 \multirow{2}{*}{Max-conf.\ coord.}
-  & LLaMA & 0.353 & 0.113 & \textbf{$+$0.240} \\
+  & LLaMA & 0.353 & 0.113 & \textbf{$+$0.239} \\
   & Qwen  & 0.366 & 0.076 & \textbf{$+$0.290} \\
 \bottomrule
 \end{tabular}
@@ -1013,7 +1014,7 @@ weight to outliers, so the arithmetic mean can be pulled far from the honest
 majority by a coordinated wrong-answer cluster. By minimizing unsquared
 distances, the geometric median limits this influence: a minority of fewer than
 half the agents cannot move it arbitrarily far from the honest majority. The
-centroid shift results ($+0.240$ to $+0.290$ embedding units, positive across
+centroid shift results ($+0.239$ to $+0.290$ embedding units, positive across
 all conditions and both models) support this mechanism empirically, though
 geometric proximity to the honest cluster does not guarantee that the
 nearest-centroid agent's text matches the correct answer.
