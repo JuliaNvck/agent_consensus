@@ -83,10 +83,12 @@ embedding-space geometric median selector.
 
 Across experiments on LLaMA 3.1 8B and Qwen2.5 7B using 100 cached questions
 from GSM8K and StrategyQA with an 80-question held-out evaluation split per
-model, strict answer extraction corrects a 16.5 percentage point
-accuracy collapse in LLaMA majority-vote results at high fault fractions, and
-the all-fault aggregate shows the strongest $\beta=45\%$ result for TopKMass
-filtering plus strict majority vote. TopKMass is the strongest of three tested
+model, strict answer extraction (a methodological correction to baseline
+self-consistency that abstains rather than counting unparseable outputs as
+votes) removes a 16.5 percentage point accuracy collapse in LLaMA majority-vote
+results at high fault fractions. At $\beta=45\%$, the all-fault aggregate
+favors TopKMass filtering plus strict majority vote over the strict-extraction
+baseline (LLaMA 0.727 vs.\ 0.708; Qwen 0.656 vs.\ 0.648). TopKMass is the strongest of three tested
 logprob-based correctness signals (LLaMA AUC/AP 0.612/0.810; Qwen 0.635/0.776),
 although its absolute discriminative power is modest. Under coordinated synthetic
 wrong-answer injection, geometric median nearest-centroid improves LLaMA
@@ -349,7 +351,7 @@ F2 (Experiment~1 invalid-format injection)
   & 1.00 (logprob spoof: sum $= 1.00$ exactly)
   & \textbf{Passes} at any $\tau \leq 1.0$ \\
 Clean agent
-  & $[0.96,\,1.00]$ (typical range)
+  & $[0.91,\,1.00]$ LLaMA, $[0.97,\,1.00]$ Qwen (5th percentile to max over clean agents)
   & Passes unless rare outlier \\
 \bottomrule
 \end{tabularx}
@@ -476,8 +478,6 @@ corrects.
 \caption{Experiment~1 accuracy by condition, model, and fault fraction
   (averaged over $N \in \{5,7\}$ and all fault types).}
 \label{tab:exp1-results}
-\label{tab:exp1-llama}
-\label{tab:exp1-qwen}
 \footnotesize
 \setlength{\tabcolsep}{4.2pt}
 \begin{tabularx}{\textwidth}{l X ccccc}
@@ -656,8 +656,10 @@ supports the sliding-window design of TopKMass, which measures confidence
 stability across the sequence rather than raw variance.
 
 \paragraph{No signal is a correctness oracle.}
-Both correct and incorrect agents cluster in a narrow high-confidence range
-($[0.96,\,1.00]$ for LLaMA, $[0.94,\,1.00]$ for Qwen) with heavy overlap. The
+Both correct and incorrect agents cluster in a high-confidence range
+(5th percentile to max: $[0.91,\,1.00]$ for LLaMA, $[0.97,\,1.00]$ for Qwen)
+with heavy overlap; LLaMA has a small lower tail extending to a minimum of
+approximately 0.72. The
 correct-agent TopKMass median is higher than the incorrect-agent median (see
 Figure~\ref{fig:topkmass-dist}, which shows the distribution for clean LLaMA
 agents). TopKMass's primary value as a
@@ -702,10 +704,10 @@ agents, 5 clean agents). Three coordination degrees are evaluated:
         from the ground truth (``The answer is \{opposite\}.'' for StrategyQA;
         ``The answer is \{gt+7\}.'' for GSM8K). They cluster at a single point
         in embedding space.
-  \item \textbf{Maximally adversarial:} Identical to coordinated in answer
+  \item \textbf{Max-confidence coordinated:} Identical to coordinated in answer
         content, with a higher-confidence logprob spoof. Because both coordinated
         settings achieve TopKMass$=1.00$, this condition is numerically
-        equivalent to coordinated for Module~1 admission and is interpreted as a
+        equivalent to coordinated for Module~1 admission and is reported as a
         duplicate stress setting rather than a stronger attack.
 \end{itemize}
 
@@ -757,7 +759,7 @@ across all evaluation questions.
   & \texttt{stage1\_only}           & \textbf{70.0\%} & \textbf{65.0\%} \\
   & \texttt{full\_pipeline}         & 56.25\%         & 48.75\%         \\
 \midrule
-\multirow{3}{*}{Max adversarial}
+\multirow{3}{*}{Max-conf.\ coord.}
   & \texttt{majority\_answer\_vote} & 62.5\%          & \textbf{65.0\%} \\
   & \texttt{stage1\_only}           & \textbf{70.0\%} & \textbf{65.0\%} \\
   & \texttt{full\_pipeline}         & 56.25\%         & 48.75\%         \\
@@ -788,7 +790,7 @@ across all evaluation questions.
   & LLaMA & 0.353 & 0.113 & \textbf{$+$0.240} \\
   & Qwen  & 0.366 & 0.076 & \textbf{$+$0.290} \\
 \midrule
-\multirow{2}{*}{Max adversarial}
+\multirow{2}{*}{Max-conf.\ coord.}
   & LLaMA & 0.353 & 0.113 & \textbf{$+$0.240} \\
   & Qwen  & 0.366 & 0.076 & \textbf{$+$0.290} \\
 \bottomrule
@@ -1090,6 +1092,22 @@ different patterns of answer coordination. The centroid shift metric provides
 mechanistic evidence about embedding-space behavior, but accuracy results may
 differ under different adversarial strategies.
 
+\paragraph{Embedding-model dependency.}
+All Module~2 results use a single sentence encoder
+(\texttt{sentence-transformers/all-mpnet-base-v2}, 768-dimensional). The
+geometric-median selector's behavior depends on the encoder's geometry, and
+results may shift under different encoders (alternative MTEB tiers,
+domain-tuned encoders, or contrastive vs.\ instruction-tuned objectives). We
+do not report encoder-sensitivity ablations and treat the encoder as a fixed
+component of the evaluated system.
+
+\paragraph{Task and language scope.}
+The evaluation uses two English datasets, GSM8K (arithmetic reasoning) and
+StrategyQA (multi-hop commonsense). Findings about strict extraction,
+TopKMass, and geometric-median nearest-centroid are not assumed to transfer to
+other task types (open-ended generation, code synthesis, dialog) or to
+non-English inputs without further evaluation.
+
 % ============================================================
 \section{Conclusion}
 \label{sec:conclusion}
@@ -1103,11 +1121,12 @@ probabilities. Geometric median nearest-centroid aggregation provides a separate
 mechanism for coordinated valid-format wrong answers by minimizing sum of
 embedding distances rather than sum of squared distances.
 
-The primary Experiment~1 result is methodological: strict answer extraction
-corrects a 16.5 percentage point accuracy collapse in LLaMA
-majority-vote results at high fault fractions, and the all-fault aggregate shows
-the strongest $\beta=45\%$ result for TopKMass filtering plus strict majority
-vote. Experiment~2 validates TopKMass as the strongest of the tested
+The primary Experiment~1 result is methodological: strict answer extraction, a
+correction to baseline self-consistency rather than a new consensus mechanism,
+removes a 16.5 percentage point accuracy collapse in LLaMA majority-vote
+results at high fault fractions. At $\beta=45\%$, the all-fault aggregate
+favors TopKMass filtering plus strict majority vote over the strict-extraction
+baseline (LLaMA 0.727 vs.\ 0.708; Qwen 0.656 vs.\ 0.648). Experiment~2 validates TopKMass as the strongest of the tested
 logprob-based correctness predictors (AUC$=0.612$ for LLaMA, vs.\ 0.580 for
 negated entropy and 0.448 for negated logprob variance), while confirming that
 its primary value is detecting broken agents far outside the clean cluster rather
@@ -1134,6 +1153,7 @@ dev slices; (3) larger evaluation sets with per-question confidence intervals;
 and (5) streaming consensus settings where agent count varies dynamically.
 
 % ============================================================
+\FloatBarrier
 \bibliographystyle{acl_natbib}
 \bibliography{references}
 
@@ -1142,9 +1162,7 @@ and (5) streaming consensus settings where agent count varies dynamically.
 
 \section{Additional Figures and Tables}
 \label{app:figures}
-\label{app:topkmass-dist}
-\label{app:qwen-signals}
-\label{app:liveness}
+\FloatBarrier
 
 \begin{figure}[!t]
 \centering
@@ -1177,20 +1195,23 @@ and (5) streaming consensus settings where agent count varies dynamically.
   LLaMA (0.612); negated entropy is a closer second for Qwen (AUC gap 0.019
   vs.\ 0.032 for LLaMA). Logprob variance remains weak for Qwen
   (AUC$=0.538$, though above the LLaMA value of 0.448). The narrower TopKMass
-  score range for Qwen ($[0.94,\,1.00]$) vs.\ LLaMA ($[0.79,\,1.00]$) reflects
-  Qwen's generally higher per-token confidence and contributes to the calibration
+  score range for Qwen ($[0.97,\,1.00]$, 5th percentile to max) vs.\ LLaMA
+  ($[0.91,\,1.00]$, with a lower tail to approximately 0.72) reflects Qwen's
+  generally higher per-token confidence and contributes to the calibration
   artifact observed in Experiments~1 and~3.}
 \label{fig:qwen-signals}
 \end{figure*}
 
 \begin{table*}[!t]
 \centering
-\caption{Liveness fallback frequency by condition, $N$, $\beta$, and model
-  (averaged over fault types). At $\beta=0.45$ with $N=7$,
-  $\lfloor 7 \times 0.45 \rfloor = 3$ faults; the BFT threshold is $2f+1=5$
-  agents. With 3 F1 or F3 agents filtered by Module~1, only 4 agents remain,
-  which is below threshold, and the liveness fallback triggers at 100\% of
-  questions.}
+\caption{Liveness fallback frequency by condition, $N$, $\beta$, and model,
+  averaged over the four fault types (F1, F2, F3, mix) in
+  \texttt{experiment\_1\_\{llama,qwen\}\_v4.csv}. At $\beta=0.45$ with $N=7$,
+  $\lfloor 7 \times 0.45 \rfloor = 3$ faults; the BFT liveness threshold is
+  $2f+1=5$ admitted agents. F1-only and F3-only slices individually trigger
+  fallback at 100\% of questions in this regime, while F2 retains all
+  spoofed-pass agents at 0\% fallback, so the all-fault average falls between
+  these extremes.}
 \label{tab:liveness}
 \small
 \begin{tabular}{llccccc}
@@ -1199,19 +1220,29 @@ and (5) streaming consensus settings where agent count varies dynamically.
   & $\bm{\beta}=0$\% & $\bm{\beta}=15$\%
   & $\bm{\beta}=30$\% & $\bm{\beta}=45$\% \\
 \midrule
-LLaMA 3.1 8B & \texttt{hard\_only}   & 7 & 5.0\%   & 7.5\%   & 18.8\% & 100\% (F1/F3) \\
-LLaMA 3.1 8B & \texttt{full\_system} & 7 & 5.0\%   & 7.5\%   & 18.8\% & 100\% (F1/F3) \\
-Qwen2.5 7B   & \texttt{hard\_only}   & 7 & 13.75\% & 16.25\% & 26.25\% & 100\% (F1/F3) \\
-Qwen2.5 7B   & \texttt{full\_system} & 7 & 13.75\% & 16.25\% & 26.25\% & 100\% (F1/F3) \\
+LLaMA 3.1 8B & \texttt{hard\_only}   & 7 & 5.00\%  & 5.94\%  & 11.25\% & 53.13\% \\
+LLaMA 3.1 8B & \texttt{full\_system} & 7 & 5.00\%  & 5.94\%  & 11.25\% & 53.13\% \\
+Qwen2.5 7B   & \texttt{hard\_only}   & 7 & 13.75\% & 16.56\% & 20.00\% & 57.81\% \\
+Qwen2.5 7B   & \texttt{full\_system} & 7 & 13.75\% & 16.56\% & 20.00\% & 57.81\% \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-\texttt{hard\_only} and \texttt{full\_system} are therefore equivalent to the
-unfiltered baseline under F1/F3 at $\beta=0.45$, $N=7$. The difference between
-conditions at $\beta=0.45$ in Table~\ref{tab:exp1-results} is driven by
-Experiment~1 F2 questions, where spoofed logprobs pass Module~1 and filtering
-remains active.
+\texttt{hard\_only} reduces to the unfiltered baseline under F1/F3 at
+$\beta=0.45$, $N=7$, since fallback admits the full pool at 100\% of questions
+when 3 of 7 agents are filtered and the remaining 4 are below the $2f+1=5$
+threshold. \texttt{full\_system} does not strictly reduce to baseline in this
+regime: even when the liveness flag is set, geometric median nearest-centroid
+still selects from the admitted (possibly degraded) pool rather than performing
+strict majority voting, which produces different answers on a subset of
+questions. Empirically, for $N=7$, $\beta=0.45$, F1: LLaMA \texttt{baseline}
+$=$ \texttt{hard\_only} $= 0.7375$ but \texttt{full\_system} $= 0.6375$; Qwen
+\texttt{baseline} $=$ \texttt{hard\_only} $= 0.675$ but \texttt{full\_system}
+$= 0.6625$. For F3, Qwen \texttt{baseline} $=$ \texttt{hard\_only} $= 0.575$
+while \texttt{full\_system} $= 0.6375$. The remaining differences between
+conditions in Table~\ref{tab:exp1-results} at $\beta=0.45$ are jointly driven
+by this fallback-time selector behavior and by Experiment~1 F2 questions, where
+spoofed logprobs pass Module~1 and filtering remains active.
 
 \section{Reproducibility: Code Paths and Result Artifacts}
 \label{app:code}
