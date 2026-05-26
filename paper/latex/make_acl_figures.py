@@ -300,7 +300,7 @@ def plot_topkmass_distribution() -> None:
 
 def plot_exp3() -> None:
     coord = ["uncoordinated", "coordinated", "maximally_adversarial"]
-    labels = ["Uncoord.", "Coord.", "Max adv."]
+    labels = ["Uncoord.", "Coord.", "Max-conf. coord."]
     specs = [
         ("majority_answer_vote", "#d62728", "--", "s", "Majority vote"),
         ("stage1_only", "#2ca02c", "-", "o", "GM selector"),
